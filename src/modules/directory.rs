@@ -2,21 +2,16 @@
 use super::utils::directory_nix as directory_utils;
 #[cfg(target_os = "windows")]
 use super::utils::directory_win as directory_utils;
-use super::utils::path::PathExt as SPathExt;
-use indexmap::IndexMap;
-use path_slash::PathExt;
-use std::iter::FromIterator;
-use std::path::{Path, PathBuf};
+use super::utils::path::{PathExt, NormalizedPath, PathKind};
+use std::path::Path;
+use std::fmt::Write;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{Context, Module};
 
-use super::utils::directory::truncate;
 use crate::config::RootModuleConfig;
-use crate::configs::directory::DirectoryConfig;
+use crate::configs::directory::{DirectoryConfig, PathSeparatorOption};
 use crate::formatter::StringFormatter;
-
-const HOME_SYMBOL: &str = "~";
 
 /// Creates a module with the current logical or physical directory
 ///
@@ -37,8 +32,10 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     let config: DirectoryConfig = DirectoryConfig::try_load(module.config);
 
     let home_dir = dirs_next::home_dir().expect("Unable to determine HOME_DIR for user");
+    let home_dir = home_dir.normalize();
+
     let physical_dir = &context.current_dir;
-    let display_dir = if config.use_logical_path {
+    let current_dir = if config.use_logical_path {
         &context.logical_dir
     } else {
         &context.current_dir
@@ -46,7 +43,7 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
 
     log::debug!("Home dir: {:?}", &home_dir);
     log::debug!("Physical dir: {:?}", &physical_dir);
-    log::debug!("Display dir: {:?}", &display_dir);
+    log::debug!("Current dir: {:?}", &current_dir);
 
     // Attempt repository path contraction (if we are in a git repository)
     let repo = if config.truncate_to_repo {
@@ -54,47 +51,42 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     } else {
         None
     };
-    let dir_string = repo
-        .and_then(|r| r.root.as_ref())
-        .filter(|root| *root != &home_dir)
-        // NOTE: Always attempt to contract repo paths from the physical dir as
-        // the logical dir _may_ not be be a valid physical disk
-        // path and may be impossible to contract.
-        .and_then(|root| contract_repo_path(&physical_dir, root));
-
-    // Otherwise use the logical path, automatically contracting
-    // the home directory if required.
-    let dir_string =
-        dir_string.unwrap_or_else(|| contract_path(&display_dir, &home_dir, HOME_SYMBOL));
-
-    #[cfg(windows)]
-    let dir_string = remove_extended_path_prefix(dir_string);
+    
+    let mut display_dir = repo
+        .and_then(|repo| repo.root.as_ref())
+        .and_then(|repo_root| {
+            let repo_root = repo_root.normalize();
+            // If the user's home repo is a git directory
+            // prefer normal home path contraction.
+            if repo_root == home_dir {
+                return None;
+            }
+            // NOTE: Always attempt to contract repo paths from the physical dir as
+            // the logical dir _may_ not be be a valid physical disk
+            // path and may not include the repo path prefix.
+            // E.g. a repo path in your the user's home directory
+            let mut dir = physical_dir.normalize(); 
+            if try_contract_repo_path(&mut dir, &repo_root) {
+                Some(dir)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            // Otherwise use the logical path, automatically contracting
+            // the home directory if required.
+            let mut dir = current_dir.normalize();
+            try_contract_home_path(&mut dir, &home_dir, &config);
+            dir
+        });
 
     // Apply path substitutions
-    let dir_string = substitute_path(dir_string, &config.substitutions);
+    substitute_path(&mut display_dir, &config);
 
-    // Truncate the dir string to the maximum number of path components
-    let dir_string = truncate(dir_string, config.truncation_length as usize);
+    // Apply path truncation
+    truncate_path(&mut display_dir, &config);
 
-    let prefix = if is_truncated(&dir_string) {
-        // Substitutions could have changed the prefix, so don't allow them and
-        // fish-style path contraction together
-        if config.fish_style_pwd_dir_length > 0 && config.substitutions.is_empty() {
-            // If user is using fish style path, we need to add the segment first
-            let contracted_home_dir = contract_path(&display_dir, &home_dir, HOME_SYMBOL);
-            to_fish_style(
-                config.fish_style_pwd_dir_length as usize,
-                contracted_home_dir,
-                &dir_string,
-            )
-        } else {
-            String::from(config.truncation_symbol)
-        }
-    } else {
-        String::from("")
-    };
-
-    let displayed_path = prefix + &dir_string;
+    let display_path = format_path_for_display(&display_dir, &config).expect("formatted path");
     let lock_symbol = String::from(config.read_only);
 
     let parsed = StringFormatter::new(config.format).and_then(|formatter| {
@@ -105,7 +97,7 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
                 _ => None,
             })
             .map(|variable| match variable {
-                "path" => Some(Ok(&displayed_path)),
+                "path" => Some(Ok(&display_path)),
                 "read_only" => {
                     if is_readonly_dir(&physical_dir) {
                         Some(Ok(&lock_symbol))
@@ -129,30 +121,6 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     Some(module)
 }
 
-#[cfg(windows)]
-fn remove_extended_path_prefix(path: String) -> String {
-    fn try_trim_prefix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-        if !s.starts_with(prefix) {
-            return None;
-        }
-        Some(&s[prefix.len()..])
-    }
-    // Trim any Windows extended-path prefix from the display path
-    if let Some(unc) = try_trim_prefix(&path, r"\\?\UNC\") {
-        return format!(r"\\{}", unc);
-    }
-    if let Some(p) = try_trim_prefix(&path, r"\\?\") {
-        return p.to_string();
-    }
-    path
-}
-
-fn is_truncated(path: &str) -> bool {
-    !(path.starts_with(HOME_SYMBOL)
-        || PathBuf::from(path).has_root()
-        || (cfg!(target_os = "windows") && PathBuf::from(String::from(path) + r"\").has_root()))
-}
-
 fn is_readonly_dir(path: &Path) -> bool {
     match directory_utils::is_write_allowed(path) {
         Ok(res) => !res,
@@ -167,131 +135,116 @@ fn is_readonly_dir(path: &Path) -> bool {
     }
 }
 
-/// Contract the root component of a path
-///
-/// Replaces the `top_level_path` in a given `full_path` with the provided
-/// `top_level_replacement`.
-fn contract_path(full_path: &Path, top_level_path: &Path, top_level_replacement: &str) -> String {
-    if !full_path.normalised_starts_with(top_level_path) {
-        return full_path.to_slash().unwrap();
+// Attempts to contract the path to the home path.
+// Returns the formatted path and a flag indicating that the path is rooted.
+fn try_contract_home_path(path: &mut NormalizedPath, home_path: &NormalizedPath, config: &DirectoryConfig) -> bool {
+    if !path.starts_with(home_path) || !home_path.is_absolute() {
+        return false;
     }
-
-    if full_path.normalised_equals(top_level_path) {
-        return top_level_replacement.to_string();
-    }
-
-    // Because we've done a normalised path comparison above
-    // we can safely ignore the Prefix components when doing this
-    // strip_prefix operation.
-    let sub_path = full_path
-        .without_prefix()
-        .strip_prefix(top_level_path.without_prefix())
-        .expect("strip path prefix");
-
-    format!(
-        "{replacement}{separator}{path}",
-        replacement = top_level_replacement,
-        separator = "/",
-        path = sub_path.to_slash().expect("slash path")
-    )
+    let short_home_path = Path::new(config.home_symbol).normalize();
+    return path.try_replace_sub_path(home_path, &short_home_path);
 }
 
-/// Contract the root component of a path based on the real path
-///
-/// Replaces the `top_level_path` in a given `full_path` with the provided
-/// `top_level_replacement` by walking ancestors and comparing its real path.
-fn contract_repo_path(full_path: &Path, top_level_path: &Path) -> Option<String> {
-    let top_level_real_path = real_path(top_level_path);
-    // Walk ancestors to preserve logical path in `full_path`.
-    // If we'd just `full_real_path.strip_prefix(top_level_real_path)`,
-    // then it wouldn't preserve logical path. It would've returned physical path.
-    for (i, ancestor) in full_path.ancestors().enumerate() {
-        let ancestor_real_path = real_path(ancestor);
-        if ancestor_real_path != top_level_real_path {
-            continue;
-        }
-
-        let components: Vec<_> = full_path.components().collect();
-        let repo_name = components[components.len() - i - 1].as_os_str().to_str()?;
-
-        if i == 0 {
-            return Some(repo_name.to_string());
-        }
-
-        let path = PathBuf::from_iter(&components[components.len() - i..]);
-        return Some(format!(
-            "{repo_name}{separator}{path}",
-            repo_name = repo_name,
-            separator = "/",
-            path = path.to_slash()?
-        ));
+// Attempts to contract the path to the given repository root.
+// Returns the formatted path and a flag indicating that the path is rooted.
+fn try_contract_repo_path(path: &mut NormalizedPath, repo_root: &NormalizedPath) -> bool {
+    if !path.starts_with(repo_root) || !repo_root.is_absolute() {
+        return false;
     }
-    None
+    // Replace the full repository path with a relative path
+    // starting from the repo root
+    let repo_name = repo_root.segments.iter().last().expect("repo root folder name").as_ref();
+    let short_repo_path = Path::new(repo_name).normalize();
+    return path.try_replace_sub_path(repo_root, &short_repo_path);
 }
 
-fn real_path<P: AsRef<Path>>(path: P) -> PathBuf {
-    let path = path.as_ref();
-    let mut buf = PathBuf::new();
-    for component in path.components() {
-        let next = buf.join(component);
-        if let Ok(realpath) = next.read_link() {
-            if realpath.is_absolute() {
-                buf = realpath;
-            } else {
-                buf.push(realpath);
-            }
-        } else {
-            buf = next;
-        }
-    }
-    buf.canonicalize().unwrap_or_else(|_| path.into())
-}
-
-/// Perform a list of string substitutions on the path
+/// Perform a list of string substitutions on the path.
 ///
 /// Given a list of (from, to) pairs, this will perform the string
 /// substitutions, in order, on the path. Any non-pair of strings is ignored.
-fn substitute_path(dir_string: String, substitutions: &IndexMap<String, &str>) -> String {
-    let mut substituted_dir = dir_string;
-    for substitution_pair in substitutions.iter() {
-        substituted_dir = substituted_dir.replace(substitution_pair.0, substitution_pair.1);
+fn substitute_path(path: &mut NormalizedPath, config: &DirectoryConfig) {
+    for (sub_path, replacement) in config.substitutions.iter() {
+        let sub_path = Path::new(sub_path).normalize();
+        let replacement = Path::new(replacement).normalize();
+        path.try_replace_sub_path(&sub_path, &replacement);
     }
-    substituted_dir
 }
 
-/// Takes part before contracted path and replaces it with fish style path
-///
-/// Will take the first letter of each directory before the contracted path and
-/// use that in the path instead. See the following example.
-///
-/// Absolute Path: `/Users/Bob/Projects/work/a_repo`
-/// Contracted Path: `a_repo`
-/// With Fish Style: `~/P/w/a_repo`
-///
-/// Absolute Path: `/some/Path/not/in_a/repo/but_nested`
-/// Contracted Path: `in_a/repo/but_nested`
-/// With Fish Style: `/s/P/n/in_a/repo/but_nested`
-fn to_fish_style(pwd_dir_length: usize, dir_string: String, truncated_dir_string: &str) -> String {
-    let replaced_dir_string = dir_string.trim_end_matches(truncated_dir_string).to_owned();
-    let components = replaced_dir_string.split('/').collect::<Vec<&str>>();
-
-    if components.is_empty() {
-        return replaced_dir_string;
+/// Perform path truncation.
+/// 
+/// Given a path longer than the configured truncation length, remove
+/// leading path segments and replace them with the truncation symbol.
+fn truncate_path<'a>(path: &mut NormalizedPath<'a>, config: &DirectoryConfig<'a>) {
+    let path_len = path.segments.len();
+    let trunc_len = config.truncation_length;
+    if trunc_len > 0 && path_len > trunc_len {
+        path.kind = PathKind::Relative;
+        path.segments.splice(0..(path_len - trunc_len), Some(std::borrow::Cow::Borrowed(config.truncation_symbol)));
     }
+}
 
-    components
-        .into_iter()
-        .map(|word| -> String {
-            let chars = UnicodeSegmentation::graphemes(word, true).collect::<Vec<&str>>();
-            match word {
-                "" => "".to_string(),
-                _ if chars.len() <= pwd_dir_length => word.to_string(),
-                _ if word.starts_with('.') => chars[..=pwd_dir_length].join(""),
-                _ => chars[..pwd_dir_length].join(""),
+/// Formats the path for final display.
+///
+/// Fish-style path segment shortening is applied by this routine.
+fn format_path_for_display(path: &NormalizedPath, config: &DirectoryConfig) -> Result<String, std::fmt::Error> {
+    let sep = match config.path_separator {
+        PathSeparatorOption::Auto => if cfg!(windows) { r"\" } else { r"/" },
+        PathSeparatorOption::Slash => r"/",
+        PathSeparatorOption::Backslash => r"\",
+    };
+    let mut buf = String::new();
+    // Write the start of the path, if there is one.
+    match path.kind {
+        PathKind::Relative => {
+            // Write the truncation indicator, if it's configured (and this isn't the contracted home path)
+            if config.truncation_symbol != "" {
+                let first_segment = path.segments.iter().map(|x| x.as_ref()).next();
+                if first_segment != Some(config.home_symbol) {
+                    write!(buf, "{}", config.truncation_symbol)?;
+                }
             }
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+        },
+        PathKind::Absolute => {
+            write!(buf, "{s}", s = sep)?;
+        },
+        PathKind::RelativeDrive(letter) => {
+            write!(buf, "{l}:", l = letter)?;
+        },
+        PathKind::AbsoluteDrive(letter) => {
+            write!(buf, "{l}:{s}", l = letter, s = sep)?;
+        },
+        PathKind::AbsoluteUnc => {
+            write!(buf, "{s}{s}", s = sep)?;
+        },
+        PathKind::AbsoluteDevice => {
+            write!(buf, "{s}{s}.{s}", s = sep)?;
+        },
+    }
+    let last_index = usize::wrapping_sub(path.segments.len(), 1);
+    for (i, segment) in path.segments.iter().enumerate() {
+        let mut segment = segment.as_ref();
+        // Apply fish-style path segment contraction?
+        // https://fishshell.com/docs/current/cmds/prompt_pwd.html
+        let segment_len = config.fish_style_pwd_dir_length;
+        if segment_len > 0 && i != last_index {
+            let mut graphemes = UnicodeSegmentation::grapheme_indices(segment, true);
+            let end = match graphemes.next().unwrap() {
+                // Always include period on .-prefixed segments (., .., .hidden, etc)
+                (_, ".") => graphemes.take(segment_len).last(),
+                (_,   _) => graphemes.take(segment_len - 1).last(),
+            };
+            if let Some((end, _)) = end {       
+                segment = &segment[..=end];
+            }
+        }
+        write!(
+            buf,
+            "{s}{p}",
+            s = if i > 0 { sep } else { "" },
+            p = segment
+        )?;
+    }
+    Ok(buf)
 }
 
 #[cfg(test)]

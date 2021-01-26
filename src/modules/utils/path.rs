@@ -1,102 +1,172 @@
-use std::path::Path;
+use std::borrow::Cow;
+use std::path::{Component, Path, Prefix};
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum PathKind {
+    /// No prefix/relative path fragment, e.g. `cat_pics` or `\\?\cat_pics`
+    Relative,
+    /// Relative path with Windows disk/drive prefix e.g. `C:` or `\\?\C:`
+    RelativeDrive(char),
+    /// Absolute path e.g. `/foo` or `\foo`
+    Absolute,
+    /// Absolute path with Windows disk/drive prefix e.g. `C:\` or `\\?\C:\`
+    AbsoluteDrive(char),
+    /// Windows' UNC path, e.g. `\\server\share` or `\\?\UNC\server\share`
+    AbsoluteUnc,
+    /// Windows device path. e.g. \\.\COM42
+    AbsoluteDevice,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct NormalizedPath<'a> {
+    pub kind: PathKind,
+    pub segments: Vec<Cow<'a, str>>,
+}
+
+impl<'a> NormalizedPath<'a> {
+
+    #[cfg(test)]
+    pub fn new<I>(kind: PathKind, segments: I) -> NormalizedPath<'a>
+        where I: IntoIterator<Item=&'a str>
+    {
+        NormalizedPath {
+            kind,
+            segments: segments.into_iter().map(|s| Cow::Borrowed(s)).collect()
+        }
+    }
+
+    pub fn is_absolute(&self) -> bool {
+        match self.kind {
+            PathKind::Relative |
+            PathKind::RelativeDrive(_) => false,
+            PathKind::Absolute |
+            PathKind::AbsoluteDrive(_) |
+            PathKind::AbsoluteUnc |
+            PathKind::AbsoluteDevice => true,
+        }
+    }
+
+    pub fn starts_with(&self, other: &NormalizedPath) -> bool {
+        self.kind == other.kind && self.segments.starts_with(&other.segments)
+    }
+
+    pub fn try_replace_sub_path(&mut self, sub_path: &NormalizedPath, replacement_path: &NormalizedPath) -> bool {
+        if sub_path.is_absolute() {
+            // Try and replace from the start of the path
+            if !self.starts_with(sub_path) {
+                return false;
+            }
+            let needle = ..sub_path.segments.len();
+            let replacement = replacement_path.segments.iter().map(|s| Cow::Owned(s.to_string()));
+            self.segments.splice(needle, replacement);
+            self.kind = replacement_path.kind;
+            return true;
+        }
+        if replacement_path.is_absolute() {
+            // Unable to replace a relative segment with a non-relative replacement
+            return false;
+        }
+        // Replace a sub-sequence of path segments
+        if let Some(needle) = find_needle(&self.segments, &sub_path.segments) {
+            let replacement = replacement_path.segments.iter().map(|s| Cow::Owned(s.to_string()));
+            self.segments.splice(needle, replacement);
+            return true;
+        }
+        // Nothing replaced
+        false
+    }
+}
+
+fn find_needle<T: PartialEq>(haystack: &[T], needle: &[T]) -> Option<std::ops::Range<usize>> {
+    // Invalid needle?
+    if needle.len() == 0 {
+        return None;
+    }
+    // Scan the haystack for the needle
+    haystack.windows(needle.len())
+        .position(|window| window == needle)
+        .map(|start| start..(start + needle.len()))
+}
 
 pub trait PathExt {
-    /// Compare this path with another path, ignoring
-    /// the differences between Verbatim and Non-Verbatim paths.
-    fn normalised_equals(&self, other: &Path) -> bool;
-    /// Determine if this path starts wit with another path fragment, ignoring
-    /// the differences between Verbatim and Non-Verbatim paths.
-    fn normalised_starts_with(&self, other: &Path) -> bool;
-    /// Strips the path Prefix component from the Path, if there is one
-    /// E.g. `\\?\path\foo` => `\foo`
-    /// E.g. `\\?\C:\foo` => `\foo`
-    /// E.g. `\\?\UNC\server\share\foo` => `\foo`
-    /// E.g. `/foo/bar` => `/foo/bar`
-    fn without_prefix(&self) -> &Path;
+    /// Normalizes a Path into a manipulatable and separator-agnostic structure
+    fn normalize(&self) -> NormalizedPath;
 }
 
-#[cfg(windows)]
-mod normalize {
-    use std::ffi::OsStr;
-    use std::path::{Component, Path, Prefix};
-
-    #[derive(Debug, PartialEq, Eq)]
-    pub enum NormalizedPrefix<'a> {
-        // No prefix, e.g. `\cat_pics` or `/cat_pics`
-        None,
-        /// Simple verbatim prefix, e.g. `\\?\cat_pics`.
-        Verbatim(&'a OsStr),
-        /// Device namespace prefix, e.g. `\\.\COM42`.
-        DeviceNS(&'a OsStr),
-        /// Prefix using Windows' _**U**niform **N**aming **C**onvention_, e.g. `\\server\share` or `\\?\UNC\server\share`
-        UNC(&'a OsStr, &'a OsStr),
-        /// Windows disk/drive prefix e.g. `C:` or `\\?\C:`
-        Disk(u8),
-    }
-
-    /// Normalise Verbatim and Non-Verbatim path prefixes into a comparable structure.
-    /// NOTE: "Verbatim" paths are the rust std library's name for Windows extended-path prefixed paths.
-    #[cfg(windows)]
-    fn normalize_prefix(prefix: Prefix) -> NormalizedPrefix {
-        match prefix {
-            Prefix::Verbatim(segment) => NormalizedPrefix::Verbatim(segment),
-            Prefix::VerbatimUNC(server, share) => NormalizedPrefix::UNC(server, share),
-            Prefix::VerbatimDisk(disk) => NormalizedPrefix::Disk(disk),
-            Prefix::DeviceNS(device) => NormalizedPrefix::DeviceNS(device),
-            Prefix::UNC(server, share) => NormalizedPrefix::UNC(server, share),
-            Prefix::Disk(disk) => NormalizedPrefix::Disk(disk),
-        }
-    }
-
-    #[cfg(windows)]
-    pub fn normalize_path(path: &Path) -> (NormalizedPrefix, &Path) {
-        let mut components = path.components();
-        if let Some(Component::Prefix(prefix)) = components.next() {
-            return (normalize_prefix(prefix.kind()), &components.as_path());
-        }
-        (NormalizedPrefix::None, path)
-    }
-}
-
-#[cfg(windows)]
 impl PathExt for Path {
-    fn normalised_starts_with(&self, other: &Path) -> bool {
-        // Do a structured comparison of two paths (normalising differences between path prefixes)
-        let (a_prefix, a_path) = normalize::normalize_path(self);
-        let (b_prefix, b_path) = normalize::normalize_path(other);
-        a_prefix == b_prefix && a_path.starts_with(b_path)
-    }
-
-    fn normalised_equals(&self, other: &Path) -> bool {
-        // Do a structured comparison of two paths (normalising differences between path prefixes)
-        let (a_prefix, a_path) = normalize::normalize_path(self);
-        let (b_prefix, b_path) = normalize::normalize_path(other);
-        a_prefix == b_prefix && a_path == b_path
-    }
-
-    fn without_prefix(&self) -> &Path {
-        let (_, path) = normalize::normalize_path(self);
-        &path
-    }
-}
-
-// NOTE: Windows path prefixes are only parsed on Windows.
-// On other platforms, we can fall back to the non-normalized versions of these routines.
-#[cfg(not(windows))]
-impl PathExt for Path {
-    #[inline]
-    fn normalised_starts_with(&self, other: &Path) -> bool {
-        self.starts_with(other)
-    }
-
-    #[inline]
-    fn normalised_equals(&self, other: &Path) -> bool {
-        self == other
-    }
-
-    #[inline]
-    fn without_prefix(&self) -> &Path {
-        self
+    fn normalize(&self) -> NormalizedPath {
+        let mut components = self.components();
+        let mut segments = Vec::new();
+        // Determine the path kind by examining the start of the path.
+        let kind = match components.next() {
+            Some(Component::Prefix(prefix)) => {
+                // Windows path handling:
+                // Normalise Verbatim and Non-Verbatim path prefixes into a comparable structure.
+                // NOTE: "Verbatim" paths are the rust std library's name for Windows extended-path prefixed paths.
+                match prefix.kind() {
+                    Prefix::Verbatim(segment) => {
+                        segments.push(segment.to_string_lossy());
+                        PathKind::Relative
+                    },
+                    Prefix::DeviceNS(name) => {
+                        segments.push(name.to_string_lossy());
+                        PathKind::AbsoluteDevice
+                    },
+                    Prefix::VerbatimUNC(server, share) |
+                    Prefix::UNC(server, share) => {
+                        segments.push(server.to_string_lossy());
+                        segments.push(share.to_string_lossy());
+                        PathKind::AbsoluteUnc
+                    },
+                    Prefix::VerbatimDisk(letter) |
+                    Prefix::Disk(letter) => {
+                        // Scan the next component to determine if this
+                        // is a relative or absolute drive path
+                        match components.next() {
+                            Some(Component::Prefix(_)) => unreachable!(),
+                            Some(Component::RootDir) => {
+                                // E.g. C:/absolute/path
+                                PathKind::AbsoluteDrive(letter as char)
+                            },
+                            Some(c) => {
+                                // E.g. C:relative/path
+                                segments.push(c.as_os_str().to_string_lossy());
+                                PathKind::RelativeDrive(letter as char)
+                            },
+                            None => {
+                                // E.g. C:
+                                PathKind::RelativeDrive(letter as char)
+                            },
+                        }
+                    },
+                }
+            },
+            Some(Component::RootDir) => {
+                // Unix absolute paths and Windows paths without a prefix
+                PathKind::Absolute
+            },
+            Some(c) => {
+                // Relative paths
+                segments.push(c.as_os_str().to_string_lossy());
+                PathKind::Relative
+            },
+            None => {
+                // Empty path
+                PathKind::Relative
+            },
+        };
+        for c in components {
+            // Skip any "RootDir" segments which may follow the "Prefix" consumed above,
+            // we treat everything after the prefix as normal path segments.
+            if c == Component::RootDir {
+                continue;
+            }
+            segments.push(c.as_os_str().to_string_lossy());
+        }
+        NormalizedPath {
+            kind,
+            segments,
+        }
     }
 }
 
@@ -106,10 +176,60 @@ mod windows {
     use super::*;
 
     #[test]
-    fn normalised_equals() {
+    fn normalize_path() {
+        assert_eq!(
+            Path::new(r"").normalize(),
+            NormalizedPath::new(PathKind::Relative, Vec::<&str>::new())
+        );
+        assert_eq!(
+            Path::new(r"a/b/c/d").normalize(),
+            NormalizedPath::new(PathKind::Relative, vec!["a","b","c","d"])
+        );
+        assert_eq!(
+            Path::new(r"/a/b/c/d").normalize(),
+            NormalizedPath::new(PathKind::Absolute, vec!["a","b","c","d"])
+        );
+        assert_eq!(
+            Path::new(r"C:").normalize(),
+            NormalizedPath::new(PathKind::RelativeDrive('C'), Vec::<&str>::new())
+        );
+        assert_eq!(
+            Path::new(r"C:\").normalize(),
+            NormalizedPath::new(PathKind::AbsoluteDrive('C'), Vec::<&str>::new())
+        );
+        assert_eq!(
+            Path::new(r"C:a\b\c\d").normalize(),
+            NormalizedPath::new(PathKind::RelativeDrive('C'), vec!["a","b","c","d"])
+        );
+        assert_eq!(
+            Path::new(r"C:\a\b\c\d").normalize(),
+            NormalizedPath::new(PathKind::AbsoluteDrive('C'), vec!["a","b","c","d"])
+        );
+        assert_eq!(
+            Path::new(r"\\Se\Sh\a\b\c\d").normalize(),
+            NormalizedPath::new(PathKind::AbsoluteUnc, vec!["Se","Sh","a","b","c","d"])
+        );
+        assert_eq!(
+            Path::new(r"\\?\C:\a\b\c\d").normalize(),
+            NormalizedPath::new(PathKind::AbsoluteDrive('C'), vec!["a","b","c","d"])
+        );
+        assert_eq!(
+            Path::new(r"\\?\UNC\Se\Sh\a\b\c\d").normalize(),
+            NormalizedPath::new(PathKind::AbsoluteUnc, vec!["Se","Sh","a","b","c","d"])
+        );
+        assert_eq!(
+            Path::new(r"\\.\COM42\a\b\c\d").normalize(),
+            NormalizedPath::new(PathKind::AbsoluteDevice, vec!["COM42","a","b","c","d"])
+        );
+    }
+
+    #[test]
+    fn normalized_equals() {
         fn test_equals(a: &Path, b: &Path) {
-            assert!(a.normalised_equals(&b));
-            assert!(b.normalised_equals(&a));
+            let a = a.normalize();
+            let b = b.normalize();
+            assert!(a == b);
+            assert!(b == a);
         }
 
         // UNC paths
@@ -138,10 +258,12 @@ mod windows {
     }
 
     #[test]
-    fn normalised_equals_differing_prefixes() {
+    fn normalized_equals_differing_prefixes() {
         fn test_not_equals(a: &Path, b: &Path) {
-            assert!(!a.normalised_equals(&b));
-            assert!(!b.normalised_equals(&a));
+            let a = a.normalize();
+            let b = b.normalize();
+            assert!(a != b);
+            assert!(b != a);
         }
 
         let verbatim_unc = Path::new(r"\\?\UNC\server\share\sub\path");
@@ -161,10 +283,12 @@ mod windows {
     }
 
     #[test]
-    fn normalised_starts_with() {
+    fn normalized_starts_with() {
         fn test_starts_with(a: &Path, b: &Path) {
-            assert!(a.normalised_starts_with(&b));
-            assert!(!b.normalised_starts_with(&a));
+            let a = a.normalize();
+            let b = b.normalize();
+            assert!(a.starts_with(&b));
+            assert!(!b.starts_with(&a));
         }
 
         // UNC paths
@@ -200,10 +324,10 @@ mod windows {
     }
 
     #[test]
-    fn normalised_starts_with_differing_prefixes() {
+    fn normalized_starts_with_differing_prefixes() {
         fn test_not_starts_with(a: &Path, b: &Path) {
-            assert!(!a.normalised_starts_with(&b));
-            assert!(!b.normalised_starts_with(&a));
+            assert!(!a.starts_with(&b));
+            assert!(!b.starts_with(&a));
         }
 
         let verbatim_unc = Path::new(r"\\?\UNC\server\share\a\b\c\d");
@@ -223,39 +347,47 @@ mod windows {
     }
 
     #[test]
-    fn without_prefix() {
-        // UNC paths
-        assert_eq!(
-            Path::new(r"\\?\UNC\server\share\sub\path").without_prefix(),
-            Path::new(r"\sub\path")
-        );
-        assert_eq!(
-            Path::new(r"\\server\share\sub\path").without_prefix(),
-            Path::new(r"\sub\path")
-        );
-        // Disk paths
-        assert_eq!(
-            Path::new(r"\\?\C:\sub\path").without_prefix(),
-            Path::new(r"\sub\path")
-        );
-        assert_eq!(
-            Path::new(r"C:\sub\path").without_prefix(),
-            Path::new(r"\sub\path")
-        );
-        // Other paths
-        assert_eq!(
-            Path::new(r"\\?\cat_pics\sub\path").without_prefix(),
-            Path::new(r"\sub\path")
-        );
-        assert_eq!(
-            Path::new(r"\\.\COM42\sub\path").without_prefix(),
-            Path::new(r"\sub\path")
-        );
-        // No prefix
-        assert_eq!(
-            Path::new(r"\cat_pics\sub\path").without_prefix(),
-            Path::new(r"\cat_pics\sub\path")
-        );
+    fn try_replace_sub_path() {
+        let abs_path = Path::new(r"C:\a\b\c\d").normalize();
+        let abs_sub_path = Path::new(r"C:\a\b").normalize();
+        let abs_replacement = Path::new(r"D:\x\y\z").normalize();
+
+        let rel_path = Path::new(r"a\b\c\d").normalize();
+        let rel_sub_path = Path::new(r"b\c").normalize();
+        let rel_replacement = Path::new(r"x\y\z").normalize();
+
+        // abs path, abs sub path, abs replacement
+        let mut path = abs_path.clone();
+        assert_eq!(path.try_replace_sub_path(&abs_sub_path, &abs_replacement), true);
+        assert_eq!(path.kind, abs_replacement.kind); // kind replaced
+        assert_eq!(&path.segments, &["x","y","z","c","d"]);
+
+        // abs path, rel sub path, abs replacement
+        let mut path = abs_path.clone();
+        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &abs_replacement), false);
+        assert_eq!(path, abs_path); // unchanged
+
+        // abs path, rel sub path, rel replacement
+        let mut path = abs_path.clone();
+        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &rel_replacement), true);
+        assert_eq!(path.kind, abs_path.kind); // kind unchanged
+        assert_eq!(&path.segments, &["a","x","y","z","d"]);
+
+        // rel path, abs sub path, abs replacement
+        let mut path = rel_path.clone();
+        assert_eq!(path.try_replace_sub_path(&abs_sub_path, &abs_replacement), false);
+        assert_eq!(path, rel_path); // unchanged (unable to match abs sub path)
+
+        // rel path, rel sub path, abs replacement
+        let mut path = rel_path.clone();
+        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &abs_replacement), false);
+        assert_eq!(path, rel_path); // unchanged (unable to replace rel sub path with abs path)
+
+        // rel path, rel sub path, rel replacement
+        let mut path = rel_path.clone();
+        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &rel_replacement), true);
+        assert_eq!(path.kind, rel_path.kind); // kind unchanged
+        assert_eq!(&path.segments, &["a","x","y","z","d"]);
     }
 }
 
@@ -265,81 +397,106 @@ mod nix {
     use super::*;
 
     #[test]
-    fn normalised_equals() {
-        let path_a = Path::new("/a/b/c/d");
-        let path_b = Path::new("/a/b/c/d");
-        assert!(path_a.normalised_equals(&path_b));
-        assert!(path_b.normalised_equals(&path_a));
-
-        let path_c = Path::new("/a/b");
-        assert!(!path_a.normalised_equals(&path_c));
+    fn normalize_path() {
+        assert_eq!(
+            Path::new(r"").normalize(),
+            NormalizedPath::new(PathKind::Relative, Vec::<&str>::new())
+        );
+        assert_eq!(
+            Path::new(r"a/b/c/d").normalize(),
+            NormalizedPath::new(PathKind::Relative, vec!["a","b","c","d"])
+        );
+        assert_eq!(
+            Path::new(r"/a/b/c/d").normalize(),
+            NormalizedPath::new(PathKind::Absolute, vec!["a","b","c","d"])
+        );
+        // Windows prefixes/path seperators are not parsed on Unix
+        assert_eq!(
+            Path::new(r"C:\a\b\c\d").normalize(),
+            NormalizedPath::new(PathKind::Relative, vec![r"C:\a\b\c\d"])
+        );
     }
 
     #[test]
-    fn normalised_equals_differing_prefixes() {
+    fn normalized_equals() {
+        let path_a = Path::new("/a/b/c/d").normalize();
+        let path_b = Path::new("/a/b/c/d").normalize();
+        assert!(path_a == path_b);
+        assert!(path_b == path_a);
+
+        let path_c = Path::new("/a/b").normalize();
+        assert!(path_a != path_c);
+    }
+
+    #[test]
+    fn normalized_equals_differing_prefixes() {
         // Windows path prefixes are not parsed on *nix
-        let path_a = Path::new(r"\\?\UNC\server\share\a\b\c\d");
-        let path_b = Path::new(r"\\server\share\a\b\c\d");
-        assert!(!path_a.normalised_equals(&path_b));
-        assert!(!path_b.normalised_equals(&path_a));
-
-        assert!(path_a.normalised_equals(&path_a));
+        let path_a = Path::new(r"\\?\UNC\server\share\a\b\c\d").normalize();
+        let path_b = Path::new(r"\\server\share\a\b\c\d").normalize();
+        assert!(path_a != path_b);
+        assert!(path_b != path_a);
+        assert!(path_a == path_a);
     }
 
     #[test]
-    fn normalised_starts_with() {
-        let path_a = Path::new("/a/b/c/d");
-        let path_b = Path::new("/a/b");
-        assert!(path_a.normalised_starts_with(&path_b));
-        assert!(!path_b.normalised_starts_with(&path_a));
+    fn normalized_starts_with() {
+        let path_a = Path::new("/a/b/c/d").normalize();
+        let path_b = Path::new("/a/b").normalize();
+        assert!(path_a.starts_with(&path_b));
+        assert!(!path_b.starts_with(&path_a));
     }
 
     #[test]
-    fn normalised_starts_with_differing_prefixes() {
+    fn normalized_starts_with_differing_prefixes() {
         // Windows path prefixes are not parsed on *nix
-        let path_a = Path::new(r"\\?\UNC\server\share\a\b\c\d");
-        let path_b = Path::new(r"\\server\share\a\b");
-        assert!(!path_a.normalised_starts_with(&path_b));
-        assert!(!path_b.normalised_starts_with(&path_a));
-
-        assert!(path_a.normalised_starts_with(&path_a));
+        let path_a = Path::new(r"\\?\UNC\server\share\a\b\c\d").normalize();
+        let path_b = Path::new(r"\\server\share\a\b").normalize();
+        assert!(!path_a.starts_with(&path_b));
+        assert!(!path_b.starts_with(&path_a));
+        assert!(path_a.starts_with(&path_a));
     }
 
     #[test]
-    fn without_prefix() {
-        // Windows path prefixes are not parsed on *nix
+    fn try_replace_sub_path() {
+        let abs_path = Path::new(r"/a/b/c/d").normalize();
+        let abs_sub_path = Path::new(r"/a/b").normalize();
+        let abs_replacement = Path::new(r"/x/y/z").normalize();
 
-        // UNC paths
-        assert_eq!(
-            Path::new(r"\\?\UNC\server\share\sub\path").without_prefix(),
-            Path::new(r"\\?\UNC\server\share\sub\path")
-        );
-        assert_eq!(
-            Path::new(r"\\server\share\sub\path").without_prefix(),
-            Path::new(r"\\server\share\sub\path")
-        );
-        // Disk paths
-        assert_eq!(
-            Path::new(r"\\?\C:\sub\path").without_prefix(),
-            Path::new(r"\\?\C:\sub\path")
-        );
-        assert_eq!(
-            Path::new(r"C:\sub\path").without_prefix(),
-            Path::new(r"C:\sub\path")
-        );
-        // Other paths
-        assert_eq!(
-            Path::new(r"\\?\cat_pics\sub\path").without_prefix(),
-            Path::new(r"\\?\cat_pics\sub\path")
-        );
-        assert_eq!(
-            Path::new(r"\\.\COM42\sub\path").without_prefix(),
-            Path::new(r"\\.\COM42\sub\path")
-        );
-        // No prefix
-        assert_eq!(
-            Path::new(r"\cat_pics\sub\path").without_prefix(),
-            Path::new(r"\cat_pics\sub\path")
-        );
+        let rel_path = Path::new(r"a/b/c/d").normalize();
+        let rel_sub_path = Path::new(r"b/c").normalize();
+        let rel_replacement = Path::new(r"x/y/z").normalize();
+
+        // abs path, abs sub path, abs replacement
+        let mut path = abs_path.clone();
+        assert_eq!(path.try_replace_sub_path(&abs_sub_path, &abs_replacement), true);
+        assert_eq!(path.kind, abs_replacement.kind); // kind replaced
+        assert_eq!(&path.segments, &["x","y","z","c","d"]);
+
+        // abs path, rel sub path, abs replacement
+        let mut path = abs_path.clone();
+        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &abs_replacement), false);
+        assert_eq!(path, abs_path); // unchanged
+
+        // abs path, rel sub path, rel replacement
+        let mut path = abs_path.clone();
+        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &rel_replacement), true);
+        assert_eq!(path.kind, abs_path.kind); // kind unchanged
+        assert_eq!(&path.segments, &["a","x","y","z","d"]);
+
+        // rel path, abs sub path, abs replacement
+        let mut path = rel_path.clone();
+        assert_eq!(path.try_replace_sub_path(&abs_sub_path, &abs_replacement), false);
+        assert_eq!(path, rel_path); // unchanged (unable to match abs sub path)
+
+        // rel path, rel sub path, abs replacement
+        let mut path = rel_path.clone();
+        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &abs_replacement), false);
+        assert_eq!(path, rel_path); // unchanged (unable to replace rel sub path with abs path)
+
+        // rel path, rel sub path, rel replacement
+        let mut path = rel_path.clone();
+        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &rel_replacement), true);
+        assert_eq!(path.kind, rel_path.kind); // kind unchanged
+        assert_eq!(&path.segments, &["a","x","y","z","d"]);
     }
 }
