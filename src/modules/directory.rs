@@ -52,11 +52,11 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
         None
     };
     
-    let mut display_dir = repo
+    let mut display_path = repo
         .and_then(|repo| repo.root.as_ref())
         .and_then(|repo_root| {
             let repo_root = repo_root.normalize();
-            // If the user's home repo is a git directory
+            // If the user's home repo is a git directory then
             // prefer normal home path contraction.
             if repo_root == home_dir {
                 return None;
@@ -65,28 +65,21 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
             // the logical dir _may_ not be be a valid physical disk
             // path and may not include the repo path prefix.
             // E.g. a repo path in your the user's home directory
-            let mut dir = physical_dir.normalize(); 
-            if try_contract_repo_path(&mut dir, &repo_root) {
-                Some(dir)
-            } else {
-                None
-            }
+            contract_repo_path(physical_dir.normalize(), &repo_root)
         })
         .unwrap_or_else(|| {
             // Otherwise use the logical path, automatically contracting
             // the home directory if required.
-            let mut dir = current_dir.normalize();
-            try_contract_home_path(&mut dir, &home_dir, &config);
-            dir
+            contract_home_path(current_dir.normalize(), &home_dir, &config)
         });
 
     // Apply path substitutions
-    substitute_path(&mut display_dir, &config);
+    substitute_path(&mut display_path, &config);
 
     // Apply path truncation
-    truncate_path(&mut display_dir, &config);
+    truncate_path(&mut display_path, &config);
 
-    let display_path = format_path_for_display(&display_dir, &config).expect("formatted path");
+    let display_path = format_path_for_display(&display_path, &config).expect("formatted path");
     let lock_symbol = String::from(config.read_only);
 
     let parsed = StringFormatter::new(config.format).and_then(|formatter| {
@@ -137,25 +130,26 @@ fn is_readonly_dir(path: &Path) -> bool {
 
 // Attempts to contract the path to the home path.
 // Returns the formatted path and a flag indicating that the path is rooted.
-fn try_contract_home_path(path: &mut NormalizedPath, home_path: &NormalizedPath, config: &DirectoryConfig) -> bool {
-    if !path.starts_with(home_path) || !home_path.is_absolute() {
-        return false;
+fn contract_home_path<'a>(mut path: NormalizedPath<'a>, home_path: &NormalizedPath, config: &DirectoryConfig<'a>) -> NormalizedPath<'a> {
+    if home_path.is_absolute() && path.starts_with(home_path) {
+        let short_home_path = Path::new(config.home_symbol).normalize();
+        path.try_replace_sub_path(home_path, &short_home_path);
     }
-    let short_home_path = Path::new(config.home_symbol).normalize();
-    return path.try_replace_sub_path(home_path, &short_home_path);
+    path
 }
 
 // Attempts to contract the path to the given repository root.
 // Returns the formatted path and a flag indicating that the path is rooted.
-fn try_contract_repo_path(path: &mut NormalizedPath, repo_root: &NormalizedPath) -> bool {
-    if !path.starts_with(repo_root) || !repo_root.is_absolute() {
-        return false;
+fn contract_repo_path<'a>(mut path: NormalizedPath<'a>, repo_root: &NormalizedPath<'a>) -> Option<NormalizedPath<'a>> {
+    if !repo_root.is_absolute() || !path.starts_with(repo_root) {
+        return None;
     }
     // Replace the full repository path with a relative path
     // starting from the repo root
     let repo_name = repo_root.segments.iter().last().expect("repo root folder name").as_ref();
     let short_repo_path = Path::new(repo_name).normalize();
-    return path.try_replace_sub_path(repo_root, &short_repo_path);
+    path.try_replace_sub_path(repo_root, &short_repo_path);
+    Some(path)
 }
 
 /// Perform a list of string substitutions on the path.
