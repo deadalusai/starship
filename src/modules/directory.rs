@@ -2,9 +2,9 @@
 use super::utils::directory_nix as directory_utils;
 #[cfg(target_os = "windows")]
 use super::utils::directory_win as directory_utils;
-use super::utils::path::{PathExt, NormalizedPath, PathKind};
-use std::path::Path;
+use super::utils::path::{NormalizedPath, PathExt, PathKind};
 use std::fmt::Write;
+use std::path::Path;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{Context, Module};
@@ -51,7 +51,7 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     } else {
         None
     };
-    
+
     let mut display_path = repo
         .and_then(|repo| repo.root.as_ref())
         .and_then(|repo_root| {
@@ -130,7 +130,11 @@ fn is_readonly_dir(path: &Path) -> bool {
 
 // Attempts to contract the path to the home path.
 // Returns the formatted path and a flag indicating that the path is rooted.
-fn contract_home_path<'a>(mut path: NormalizedPath<'a>, home_path: &NormalizedPath, config: &DirectoryConfig<'a>) -> NormalizedPath<'a> {
+fn contract_home_path<'a>(
+    mut path: NormalizedPath<'a>,
+    home_path: &NormalizedPath,
+    config: &DirectoryConfig<'a>,
+) -> NormalizedPath<'a> {
     if home_path.is_absolute() && path.starts_with(home_path) {
         let short_home_path = Path::new(config.home_symbol).normalize();
         path.try_replace_sub_path(home_path, &short_home_path);
@@ -140,13 +144,21 @@ fn contract_home_path<'a>(mut path: NormalizedPath<'a>, home_path: &NormalizedPa
 
 // Attempts to contract the path to the given repository root.
 // Returns the formatted path and a flag indicating that the path is rooted.
-fn contract_repo_path<'a>(mut path: NormalizedPath<'a>, repo_root: &NormalizedPath<'a>) -> Option<NormalizedPath<'a>> {
+fn contract_repo_path<'a>(
+    mut path: NormalizedPath<'a>,
+    repo_root: &NormalizedPath<'a>,
+) -> Option<NormalizedPath<'a>> {
     if !repo_root.is_absolute() || !path.starts_with(repo_root) {
         return None;
     }
     // Replace the full repository path with a relative path
     // starting from the repo root
-    let repo_name = repo_root.segments.iter().last().expect("repo root folder name").as_ref();
+    let repo_name = repo_root
+        .segments
+        .iter()
+        .last()
+        .expect("repo root folder name")
+        .as_ref();
     let short_repo_path = Path::new(repo_name).normalize();
     path.try_replace_sub_path(repo_root, &short_repo_path);
     Some(path)
@@ -165,7 +177,7 @@ fn substitute_path(path: &mut NormalizedPath, config: &DirectoryConfig) {
 }
 
 /// Perform path truncation.
-/// 
+///
 /// Given a path longer than the configured truncation length, remove
 /// leading path segments and replace them with the truncation symbol.
 fn truncate_path<'a>(path: &mut NormalizedPath<'a>, config: &DirectoryConfig<'a>) {
@@ -173,16 +185,28 @@ fn truncate_path<'a>(path: &mut NormalizedPath<'a>, config: &DirectoryConfig<'a>
     let trunc_len = config.truncation_length;
     if trunc_len > 0 && path_len > trunc_len {
         path.kind = PathKind::Relative;
-        path.segments.splice(0..(path_len - trunc_len), Some(std::borrow::Cow::Borrowed(config.truncation_symbol)));
+        path.segments.splice(
+            0..(path_len - trunc_len),
+            Some(std::borrow::Cow::Borrowed(config.truncation_symbol)),
+        );
     }
 }
 
 /// Formats the path for final display.
 ///
 /// Fish-style path segment shortening is applied by this routine.
-fn format_path_for_display(path: &NormalizedPath, config: &DirectoryConfig) -> Result<String, std::fmt::Error> {
+fn format_path_for_display(
+    path: &NormalizedPath,
+    config: &DirectoryConfig,
+) -> Result<String, std::fmt::Error> {
     let sep = match config.path_separator {
-        PathSeparatorOption::Auto => if cfg!(windows) { r"\" } else { r"/" },
+        PathSeparatorOption::Auto => {
+            if cfg!(windows) {
+                r"\"
+            } else {
+                r"/"
+            }
+        }
         PathSeparatorOption::Slash => r"/",
         PathSeparatorOption::Backslash => r"\",
     };
@@ -197,22 +221,22 @@ fn format_path_for_display(path: &NormalizedPath, config: &DirectoryConfig) -> R
                     write!(buf, "{}", config.truncation_symbol)?;
                 }
             }
-        },
+        }
         PathKind::Absolute => {
             write!(buf, "{s}", s = sep)?;
-        },
+        }
         PathKind::RelativeDrive(letter) => {
             write!(buf, "{l}:", l = letter)?;
-        },
+        }
         PathKind::AbsoluteDrive(letter) => {
             write!(buf, "{l}:{s}", l = letter, s = sep)?;
-        },
+        }
         PathKind::AbsoluteUnc => {
             write!(buf, "{s}{s}", s = sep)?;
-        },
+        }
         PathKind::AbsoluteDevice => {
             write!(buf, "{s}{s}.{s}", s = sep)?;
-        },
+        }
     }
     let last_index = usize::wrapping_sub(path.segments.len(), 1);
     for (i, segment) in path.segments.iter().enumerate() {
@@ -225,18 +249,13 @@ fn format_path_for_display(path: &NormalizedPath, config: &DirectoryConfig) -> R
             let end = match graphemes.next().unwrap() {
                 // Always include period on .-prefixed segments (., .., .hidden, etc)
                 (_, ".") => graphemes.take(segment_len).last(),
-                (_,   _) => graphemes.take(segment_len - 1).last(),
+                (_, _) => graphemes.take(segment_len - 1).last(),
             };
-            if let Some((end, _)) = end {       
+            if let Some((end, _)) = end {
                 segment = &segment[..=end];
             }
         }
-        write!(
-            buf,
-            "{s}{p}",
-            s = if i > 0 { sep } else { "" },
-            p = segment
-        )?;
+        write!(buf, "{s}{p}", s = if i > 0 { sep } else { "" }, p = segment)?;
     }
     Ok(buf)
 }

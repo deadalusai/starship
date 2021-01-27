@@ -24,25 +24,24 @@ pub struct NormalizedPath<'a> {
 }
 
 impl<'a> NormalizedPath<'a> {
-
     #[cfg(test)]
     pub fn new<I>(kind: PathKind, segments: I) -> NormalizedPath<'a>
-        where I: IntoIterator<Item=&'a str>
+    where
+        I: IntoIterator<Item = &'a str>,
     {
         NormalizedPath {
             kind,
-            segments: segments.into_iter().map(|s| Cow::Borrowed(s)).collect()
+            segments: segments.into_iter().map(|s| Cow::Borrowed(s)).collect(),
         }
     }
 
     pub fn is_absolute(&self) -> bool {
         match self.kind {
-            PathKind::Relative |
-            PathKind::RelativeDrive(_) => false,
-            PathKind::Absolute |
-            PathKind::AbsoluteDrive(_) |
-            PathKind::AbsoluteUnc |
-            PathKind::AbsoluteDevice => true,
+            PathKind::Relative | PathKind::RelativeDrive(_) => false,
+            PathKind::Absolute
+            | PathKind::AbsoluteDrive(_)
+            | PathKind::AbsoluteUnc
+            | PathKind::AbsoluteDevice => true,
         }
     }
 
@@ -50,14 +49,21 @@ impl<'a> NormalizedPath<'a> {
         self.kind == other.kind && self.segments.starts_with(&other.segments)
     }
 
-    pub fn try_replace_sub_path(&mut self, sub_path: &NormalizedPath, replacement_path: &NormalizedPath) -> bool {
+    pub fn try_replace_sub_path(
+        &mut self,
+        sub_path: &NormalizedPath,
+        replacement_path: &NormalizedPath,
+    ) -> bool {
         if sub_path.is_absolute() {
             // Try and replace from the start of the path
             if !self.starts_with(sub_path) {
                 return false;
             }
             let needle = ..sub_path.segments.len();
-            let replacement = replacement_path.segments.iter().map(|s| Cow::Owned(s.to_string()));
+            let replacement = replacement_path
+                .segments
+                .iter()
+                .map(|s| Cow::Owned(s.to_string()));
             self.segments.splice(needle, replacement);
             self.kind = replacement_path.kind;
             return true;
@@ -68,7 +74,10 @@ impl<'a> NormalizedPath<'a> {
         }
         // Replace a sub-sequence of path segments
         if let Some(needle) = find_needle(&self.segments, &sub_path.segments) {
-            let replacement = replacement_path.segments.iter().map(|s| Cow::Owned(s.to_string()));
+            let replacement = replacement_path
+                .segments
+                .iter()
+                .map(|s| Cow::Owned(s.to_string()));
             self.segments.splice(needle, replacement);
             return true;
         }
@@ -83,7 +92,8 @@ fn find_needle<T: PartialEq>(haystack: &[T], needle: &[T]) -> Option<std::ops::R
         return None;
     }
     // Scan the haystack for the needle
-    haystack.windows(needle.len())
+    haystack
+        .windows(needle.len())
         .position(|window| window == needle)
         .map(|start| start..(start + needle.len()))
 }
@@ -107,19 +117,17 @@ impl PathExt for Path {
                     Prefix::Verbatim(segment) => {
                         segments.push(segment.to_string_lossy());
                         PathKind::Relative
-                    },
+                    }
                     Prefix::DeviceNS(name) => {
                         segments.push(name.to_string_lossy());
                         PathKind::AbsoluteDevice
-                    },
-                    Prefix::VerbatimUNC(server, share) |
-                    Prefix::UNC(server, share) => {
+                    }
+                    Prefix::VerbatimUNC(server, share) | Prefix::UNC(server, share) => {
                         segments.push(server.to_string_lossy());
                         segments.push(share.to_string_lossy());
                         PathKind::AbsoluteUnc
-                    },
-                    Prefix::VerbatimDisk(letter) |
-                    Prefix::Disk(letter) => {
+                    }
+                    Prefix::VerbatimDisk(letter) | Prefix::Disk(letter) => {
                         // Scan the next component to determine if this
                         // is a relative or absolute drive path
                         match components.next() {
@@ -127,33 +135,33 @@ impl PathExt for Path {
                             Some(Component::RootDir) => {
                                 // E.g. C:/absolute/path
                                 PathKind::AbsoluteDrive(letter as char)
-                            },
+                            }
                             Some(c) => {
                                 // E.g. C:relative/path
                                 segments.push(c.as_os_str().to_string_lossy());
                                 PathKind::RelativeDrive(letter as char)
-                            },
+                            }
                             None => {
                                 // E.g. C:
                                 PathKind::RelativeDrive(letter as char)
-                            },
+                            }
                         }
-                    },
+                    }
                 }
-            },
+            }
             Some(Component::RootDir) => {
                 // Unix absolute paths and Windows paths without a prefix
                 PathKind::Absolute
-            },
+            }
             Some(c) => {
                 // Relative paths
                 segments.push(c.as_os_str().to_string_lossy());
                 PathKind::Relative
-            },
+            }
             None => {
                 // Empty path
                 PathKind::Relative
-            },
+            }
         };
         for c in components {
             // Skip any "RootDir" segments which may follow the "Prefix" consumed above,
@@ -163,10 +171,7 @@ impl PathExt for Path {
             }
             segments.push(c.as_os_str().to_string_lossy());
         }
-        NormalizedPath {
-            kind,
-            segments,
-        }
+        NormalizedPath { kind, segments }
     }
 }
 
@@ -183,11 +188,11 @@ mod windows {
         );
         assert_eq!(
             Path::new(r"a/b/c/d").normalize(),
-            NormalizedPath::new(PathKind::Relative, vec!["a","b","c","d"])
+            NormalizedPath::new(PathKind::Relative, vec!["a", "b", "c", "d"])
         );
         assert_eq!(
             Path::new(r"/a/b/c/d").normalize(),
-            NormalizedPath::new(PathKind::Absolute, vec!["a","b","c","d"])
+            NormalizedPath::new(PathKind::Absolute, vec!["a", "b", "c", "d"])
         );
         assert_eq!(
             Path::new(r"C:").normalize(),
@@ -199,27 +204,27 @@ mod windows {
         );
         assert_eq!(
             Path::new(r"C:a\b\c\d").normalize(),
-            NormalizedPath::new(PathKind::RelativeDrive('C'), vec!["a","b","c","d"])
+            NormalizedPath::new(PathKind::RelativeDrive('C'), vec!["a", "b", "c", "d"])
         );
         assert_eq!(
             Path::new(r"C:\a\b\c\d").normalize(),
-            NormalizedPath::new(PathKind::AbsoluteDrive('C'), vec!["a","b","c","d"])
+            NormalizedPath::new(PathKind::AbsoluteDrive('C'), vec!["a", "b", "c", "d"])
         );
         assert_eq!(
             Path::new(r"\\Se\Sh\a\b\c\d").normalize(),
-            NormalizedPath::new(PathKind::AbsoluteUnc, vec!["Se","Sh","a","b","c","d"])
+            NormalizedPath::new(PathKind::AbsoluteUnc, vec!["Se", "Sh", "a", "b", "c", "d"])
         );
         assert_eq!(
             Path::new(r"\\?\C:\a\b\c\d").normalize(),
-            NormalizedPath::new(PathKind::AbsoluteDrive('C'), vec!["a","b","c","d"])
+            NormalizedPath::new(PathKind::AbsoluteDrive('C'), vec!["a", "b", "c", "d"])
         );
         assert_eq!(
             Path::new(r"\\?\UNC\Se\Sh\a\b\c\d").normalize(),
-            NormalizedPath::new(PathKind::AbsoluteUnc, vec!["Se","Sh","a","b","c","d"])
+            NormalizedPath::new(PathKind::AbsoluteUnc, vec!["Se", "Sh", "a", "b", "c", "d"])
         );
         assert_eq!(
             Path::new(r"\\.\COM42\a\b\c\d").normalize(),
-            NormalizedPath::new(PathKind::AbsoluteDevice, vec!["COM42","a","b","c","d"])
+            NormalizedPath::new(PathKind::AbsoluteDevice, vec!["COM42", "a", "b", "c", "d"])
         );
     }
 
@@ -358,36 +363,54 @@ mod windows {
 
         // abs path, abs sub path, abs replacement
         let mut path = abs_path.clone();
-        assert_eq!(path.try_replace_sub_path(&abs_sub_path, &abs_replacement), true);
+        assert_eq!(
+            path.try_replace_sub_path(&abs_sub_path, &abs_replacement),
+            true
+        );
         assert_eq!(path.kind, abs_replacement.kind); // kind replaced
-        assert_eq!(&path.segments, &["x","y","z","c","d"]);
+        assert_eq!(&path.segments, &["x", "y", "z", "c", "d"]);
 
         // abs path, rel sub path, abs replacement
         let mut path = abs_path.clone();
-        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &abs_replacement), false);
+        assert_eq!(
+            path.try_replace_sub_path(&rel_sub_path, &abs_replacement),
+            false
+        );
         assert_eq!(path, abs_path); // unchanged
 
         // abs path, rel sub path, rel replacement
         let mut path = abs_path.clone();
-        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &rel_replacement), true);
+        assert_eq!(
+            path.try_replace_sub_path(&rel_sub_path, &rel_replacement),
+            true
+        );
         assert_eq!(path.kind, abs_path.kind); // kind unchanged
-        assert_eq!(&path.segments, &["a","x","y","z","d"]);
+        assert_eq!(&path.segments, &["a", "x", "y", "z", "d"]);
 
         // rel path, abs sub path, abs replacement
         let mut path = rel_path.clone();
-        assert_eq!(path.try_replace_sub_path(&abs_sub_path, &abs_replacement), false);
+        assert_eq!(
+            path.try_replace_sub_path(&abs_sub_path, &abs_replacement),
+            false
+        );
         assert_eq!(path, rel_path); // unchanged (unable to match abs sub path)
 
         // rel path, rel sub path, abs replacement
         let mut path = rel_path.clone();
-        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &abs_replacement), false);
+        assert_eq!(
+            path.try_replace_sub_path(&rel_sub_path, &abs_replacement),
+            false
+        );
         assert_eq!(path, rel_path); // unchanged (unable to replace rel sub path with abs path)
 
         // rel path, rel sub path, rel replacement
         let mut path = rel_path.clone();
-        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &rel_replacement), true);
+        assert_eq!(
+            path.try_replace_sub_path(&rel_sub_path, &rel_replacement),
+            true
+        );
         assert_eq!(path.kind, rel_path.kind); // kind unchanged
-        assert_eq!(&path.segments, &["a","x","y","z","d"]);
+        assert_eq!(&path.segments, &["a", "x", "y", "z", "d"]);
     }
 }
 
@@ -404,11 +427,11 @@ mod nix {
         );
         assert_eq!(
             Path::new(r"a/b/c/d").normalize(),
-            NormalizedPath::new(PathKind::Relative, vec!["a","b","c","d"])
+            NormalizedPath::new(PathKind::Relative, vec!["a", "b", "c", "d"])
         );
         assert_eq!(
             Path::new(r"/a/b/c/d").normalize(),
-            NormalizedPath::new(PathKind::Absolute, vec!["a","b","c","d"])
+            NormalizedPath::new(PathKind::Absolute, vec!["a", "b", "c", "d"])
         );
         // Windows prefixes/path seperators are not parsed on Unix
         assert_eq!(
@@ -468,35 +491,53 @@ mod nix {
 
         // abs path, abs sub path, abs replacement
         let mut path = abs_path.clone();
-        assert_eq!(path.try_replace_sub_path(&abs_sub_path, &abs_replacement), true);
+        assert_eq!(
+            path.try_replace_sub_path(&abs_sub_path, &abs_replacement),
+            true
+        );
         assert_eq!(path.kind, abs_replacement.kind); // kind replaced
-        assert_eq!(&path.segments, &["x","y","z","c","d"]);
+        assert_eq!(&path.segments, &["x", "y", "z", "c", "d"]);
 
         // abs path, rel sub path, abs replacement
         let mut path = abs_path.clone();
-        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &abs_replacement), false);
+        assert_eq!(
+            path.try_replace_sub_path(&rel_sub_path, &abs_replacement),
+            false
+        );
         assert_eq!(path, abs_path); // unchanged
 
         // abs path, rel sub path, rel replacement
         let mut path = abs_path.clone();
-        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &rel_replacement), true);
+        assert_eq!(
+            path.try_replace_sub_path(&rel_sub_path, &rel_replacement),
+            true
+        );
         assert_eq!(path.kind, abs_path.kind); // kind unchanged
-        assert_eq!(&path.segments, &["a","x","y","z","d"]);
+        assert_eq!(&path.segments, &["a", "x", "y", "z", "d"]);
 
         // rel path, abs sub path, abs replacement
         let mut path = rel_path.clone();
-        assert_eq!(path.try_replace_sub_path(&abs_sub_path, &abs_replacement), false);
+        assert_eq!(
+            path.try_replace_sub_path(&abs_sub_path, &abs_replacement),
+            false
+        );
         assert_eq!(path, rel_path); // unchanged (unable to match abs sub path)
 
         // rel path, rel sub path, abs replacement
         let mut path = rel_path.clone();
-        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &abs_replacement), false);
+        assert_eq!(
+            path.try_replace_sub_path(&rel_sub_path, &abs_replacement),
+            false
+        );
         assert_eq!(path, rel_path); // unchanged (unable to replace rel sub path with abs path)
 
         // rel path, rel sub path, rel replacement
         let mut path = rel_path.clone();
-        assert_eq!(path.try_replace_sub_path(&rel_sub_path, &rel_replacement), true);
+        assert_eq!(
+            path.try_replace_sub_path(&rel_sub_path, &rel_replacement),
+            true
+        );
         assert_eq!(path.kind, rel_path.kind); // kind unchanged
-        assert_eq!(&path.segments, &["a","x","y","z","d"]);
+        assert_eq!(&path.segments, &["a", "x", "y", "z", "d"]);
     }
 }

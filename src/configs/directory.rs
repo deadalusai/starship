@@ -16,9 +16,9 @@ pub enum PathSeparatorOption {
 impl<'a> ModuleConfig<'a> for PathSeparatorOption {
     fn from_config(config: &toml::Value) -> Option<Self> {
         match config.as_str() {
-            Some("slash")     => Some(PathSeparatorOption::Slash),
+            Some("slash") => Some(PathSeparatorOption::Slash),
             Some("backslash") => Some(PathSeparatorOption::Backslash),
-            Some("auto")      => Some(PathSeparatorOption::Auto),
+            Some("auto") => Some(PathSeparatorOption::Auto),
             _ => None,
         }
     }
