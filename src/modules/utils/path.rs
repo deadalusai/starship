@@ -54,11 +54,8 @@ impl<'a> NormalizedPath<'a> {
         sub_path: &NormalizedPath,
         replacement_path: &NormalizedPath,
     ) -> bool {
-        if sub_path.is_absolute() {
-            // Try and replace from the start of the path
-            if !self.starts_with(sub_path) {
-                return false;
-            }
+        // Try and replace from the start of the path
+        if self.starts_with(sub_path) {
             let needle = ..sub_path.segments.len();
             let replacement = replacement_path
                 .segments
@@ -68,11 +65,11 @@ impl<'a> NormalizedPath<'a> {
             self.kind = replacement_path.kind;
             return true;
         }
-        if replacement_path.is_absolute() {
-            // Unable to replace a relative segment with a non-relative replacement
+        if !replacement_path.is_absolute() {
+            // Can't insert an absolute path to into the middle.
             return false;
         }
-        // Replace a sub-sequence of path segments
+        // Search for the sub-sequence to replace
         if let Some(needle) = find_needle(&self.segments, &sub_path.segments) {
             let replacement = replacement_path
                 .segments
