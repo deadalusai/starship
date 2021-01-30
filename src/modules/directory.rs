@@ -52,7 +52,7 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
         None
     };
 
-    let mut display_path = repo
+    let display_path = repo
         .and_then(|repo| repo.root.as_ref())
         .and_then(|repo_root| {
             let repo_root = repo_root.normalize();
@@ -64,22 +64,18 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
             // NOTE: Always attempt to contract repo paths from the physical dir as
             // the logical dir _may_ not be be a valid physical disk
             // path and may not include the repo path prefix.
-            // E.g. a repo path in your the user's home directory
             contract_repo_path(physical_dir.normalize(), &repo_root)
         })
         .unwrap_or_else(|| {
-            // Otherwise use the logical path, automatically contracting
+            // Fall back to the logical path, automatically contracting
             // the home directory if required.
             contract_home_path(current_dir.normalize(), &home_dir, &config)
         });
 
     // Apply path substitutions
-    substitute_path(&mut display_path, &config);
+    let display_path = substitute_path(display_path, &config);
 
-    // Apply path truncation
-    truncate_path(&mut display_path, &config);
-
-    let display_path = format_path_for_display(&display_path, &config).expect("formatted path");
+    let formatted_path = format_path_for_display(&display_path, &config).expect("formatted path");
     let lock_symbol = String::from(config.read_only);
 
     let parsed = StringFormatter::new(config.format).and_then(|formatter| {
@@ -90,7 +86,7 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
                 _ => None,
             })
             .map(|variable| match variable {
-                "path" => Some(Ok(&display_path)),
+                "path" => Some(Ok(&formatted_path)),
                 "read_only" => {
                     if is_readonly_dir(&physical_dir) {
                         Some(Ok(&lock_symbol))
@@ -129,21 +125,20 @@ fn is_readonly_dir(path: &Path) -> bool {
 }
 
 // Attempts to contract the path to the home path.
-// Returns the formatted path and a flag indicating that the path is rooted.
 fn contract_home_path<'a>(
     mut path: NormalizedPath<'a>,
     home_path: &NormalizedPath,
     config: &DirectoryConfig<'a>,
 ) -> NormalizedPath<'a> {
-    if home_path.is_absolute() && path.starts_with(home_path) {
-        let short_home_path = Path::new(config.home_symbol).normalize();
-        path.try_replace_sub_path(home_path, &short_home_path);
+    if !home_path.is_absolute() || !path.starts_with(home_path) {
+        return path;
     }
+    let short_home_path = Path::new(config.home_symbol).normalize();
+    path.try_replace_sub_path(home_path, &short_home_path);
     path
 }
 
 // Attempts to contract the path to the given repository root.
-// Returns the formatted path and a flag indicating that the path is rooted.
 fn contract_repo_path<'a>(
     mut path: NormalizedPath<'a>,
     repo_root: &NormalizedPath<'a>,
@@ -153,43 +148,28 @@ fn contract_repo_path<'a>(
     }
     // Replace the full repository path with a relative path
     // starting from the repo root
-    let repo_name = repo_root
-        .segments
-        .iter()
-        .last()
-        .expect("repo root folder name")
-        .as_ref();
-    let short_repo_path = Path::new(repo_name).normalize();
+    let repo_name = repo_root.segments.iter().last().expect("repo name");
+    let short_repo_path = Path::new(repo_name.as_ref()).normalize();
     path.try_replace_sub_path(repo_root, &short_repo_path);
     Some(path)
 }
 
-/// Perform a list of string substitutions on the path.
+/// Apply the list of sub-path substitutions on the path.
 ///
-/// Given a list of (from, to) pairs, this will perform the string
-/// substitutions, in order, on the path. Any non-pair of strings is ignored.
-fn substitute_path(path: &mut NormalizedPath, config: &DirectoryConfig) {
+/// Given a list of (from, to) pairs, this will perform the path
+/// substitutions in order on the path.
+///
+/// Any non-pair of is ignored.
+fn substitute_path<'a>(
+    mut path: NormalizedPath<'a>,
+    config: &DirectoryConfig,
+) -> NormalizedPath<'a> {
     for (sub_path, replacement) in config.substitutions.iter() {
         let sub_path = Path::new(sub_path).normalize();
         let replacement = Path::new(replacement).normalize();
         path.try_replace_sub_path(&sub_path, &replacement);
     }
-}
-
-/// Perform path truncation.
-///
-/// Given a path longer than the configured truncation length, remove
-/// leading path segments and replace them with the truncation symbol.
-fn truncate_path<'a>(path: &mut NormalizedPath<'a>, config: &DirectoryConfig<'a>) {
-    let path_len = path.segments.len();
-    let trunc_len = config.truncation_length;
-    if trunc_len > 0 && path_len > trunc_len {
-        path.kind = PathKind::Relative;
-        path.segments.splice(
-            0..(path_len - trunc_len),
-            Some(std::borrow::Cow::Borrowed(config.truncation_symbol)),
-        );
-    }
+    path
 }
 
 /// Formats the path for final display.
@@ -211,53 +191,64 @@ fn format_path_for_display(
         PathSeparatorOption::Backslash => r"\",
     };
     let mut buf = String::new();
-    // Write the start of the path, if there is one.
-    match path.kind {
-        PathKind::Relative => {
-            // Write the truncation indicator, if it's configured (and this isn't the contracted home path)
-            if config.truncation_symbol != "" {
-                let first_segment = path.segments.iter().map(|x| x.as_ref()).next();
-                if first_segment != Some(config.home_symbol) {
-                    write!(buf, "{}", config.truncation_symbol)?;
-                }
+    // Are we applying path truncation?
+    if config.truncation_length != 0 && config.truncation_length < path.segments.len() {
+        // Write the truncation symbol if it is configured
+        if !config.truncation_symbol.is_empty() {
+            write!(buf, "{}", config.truncation_symbol)?;
+        }
+    } else {
+        // Write the start of the path, if there is one.
+        match path.kind {
+            PathKind::Relative => {}
+            PathKind::Absolute => {
+                write!(buf, "{s}", s = sep)?;
             }
-        }
-        PathKind::Absolute => {
-            write!(buf, "{s}", s = sep)?;
-        }
-        PathKind::RelativeDrive(letter) => {
-            write!(buf, "{l}:", l = letter)?;
-        }
-        PathKind::AbsoluteDrive(letter) => {
-            write!(buf, "{l}:{s}", l = letter, s = sep)?;
-        }
-        PathKind::AbsoluteUnc => {
-            write!(buf, "{s}{s}", s = sep)?;
-        }
-        PathKind::AbsoluteDevice => {
-            write!(buf, "{s}{s}.{s}", s = sep)?;
+            PathKind::RelativeDrive(letter) => {
+                write!(buf, "{l}:", l = letter)?;
+            }
+            PathKind::AbsoluteDrive(letter) => {
+                write!(buf, "{l}:{s}", l = letter, s = sep)?;
+            }
+            PathKind::AbsoluteUnc => {
+                write!(buf, "{s}{s}", s = sep)?;
+            }
+            PathKind::AbsoluteDevice => {
+                write!(buf, "{s}{s}.{s}", s = sep)?;
+            }
         }
     }
-    let last_index = usize::wrapping_sub(path.segments.len(), 1);
-    for (i, segment) in path.segments.iter().enumerate() {
+    // Fish-style path segment shortening
+    let last_segment_index = path.segments.len().saturating_sub(1);
+    let apply_fish_shortening = config.fish_style_pwd_dir_length > 0;
+    // Path truncation
+    let skip_segments = path.segments.len().saturating_sub(config.truncation_length);
+    for (i, segment) in path.segments.iter().enumerate().skip(skip_segments) {
         let mut segment = segment.as_ref();
-        // Apply fish-style path segment contraction?
-        // https://fishshell.com/docs/current/cmds/prompt_pwd.html
-        let segment_len = config.fish_style_pwd_dir_length;
-        if segment_len > 0 && i != last_index {
-            let mut graphemes = UnicodeSegmentation::grapheme_indices(segment, true);
-            let end = match graphemes.next().unwrap() {
-                // Always include period on .-prefixed segments (., .., .hidden, etc)
-                (_, ".") => graphemes.take(segment_len).last(),
-                (_, _) => graphemes.take(segment_len - 1).last(),
-            };
-            if let Some((end, _)) = end {
-                segment = &segment[..=end];
-            }
+        // Fish-style path segment shortening
+        // See: https://fishshell.com/docs/current/cmds/prompt_pwd.html
+        if apply_fish_shortening && i != last_segment_index {
+            segment = fish_shorten_path_segment(segment, config.fish_style_pwd_dir_length);
         }
         write!(buf, "{s}{p}", s = if i > 0 { sep } else { "" }, p = segment)?;
     }
     Ok(buf)
+}
+
+/// Applies fish-style path segment contraction to a segment
+fn fish_shorten_path_segment(segment: &str, short_len: usize) -> &str {
+    let mut graphemes = UnicodeSegmentation::grapheme_indices(segment, true);
+    let end = match graphemes.next() {
+        // Always include the leading period on .-prefixed
+        // segments (., .., .hidden, etc)
+        Some((_, ".")) => graphemes.take(short_len).last(),
+        Some(_) => graphemes.take(short_len - 1).last(),
+        None => None,
+    };
+    if let Some((end, _)) = end {
+        return &segment[..=end];
+    }
+    segment
 }
 
 #[cfg(test)]

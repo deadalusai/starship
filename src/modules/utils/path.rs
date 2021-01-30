@@ -85,7 +85,7 @@ impl<'a> NormalizedPath<'a> {
 
 fn find_needle<T: PartialEq>(haystack: &[T], needle: &[T]) -> Option<std::ops::Range<usize>> {
     // Invalid needle?
-    if needle.len() == 0 {
+    if needle.is_empty() {
         return None;
     }
     // Scan the haystack for the needle
