@@ -5,11 +5,9 @@ use starship_module_config_derive::ModuleConfig;
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum PathSeparatorOption {
-    /// Default to the path seperator suitable to the current platform.
-    Auto,
-    /// Unix default `/`
+    /// (Default) E.g. `/`
     Slash,
-    /// Windows default `\`
+    /// E.g. `\`
     Backslash,
 }
 
@@ -18,7 +16,6 @@ impl<'a> ModuleConfig<'a> for PathSeparatorOption {
         match config.as_str() {
             Some("slash") => Some(PathSeparatorOption::Slash),
             Some("backslash") => Some(PathSeparatorOption::Backslash),
-            Some("auto") => Some(PathSeparatorOption::Auto),
             _ => None,
         }
     }
@@ -48,7 +45,7 @@ impl<'a> RootModuleConfig<'a> for DirectoryConfig<'a> {
             truncate_to_repo: true,
             fish_style_pwd_dir_length: 0,
             use_logical_path: true,
-            path_separator: PathSeparatorOption::Auto,
+            path_separator: PathSeparatorOption::Slash,
             substitutions: IndexMap::new(),
             format: "[$path]($style)[$read_only]($read_only_style) ",
             style: "cyan bold",

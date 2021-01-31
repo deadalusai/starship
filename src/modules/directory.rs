@@ -204,13 +204,6 @@ fn format_path_for_display(
     config: &DirectoryConfig,
 ) -> Result<String, std::fmt::Error> {
     let sep = match config.path_separator {
-        PathSeparatorOption::Auto => {
-            if cfg!(windows) {
-                r"\"
-            } else {
-                r"/"
-            }
-        }
         PathSeparatorOption::Slash => r"/",
         PathSeparatorOption::Backslash => r"\",
     };
@@ -444,17 +437,6 @@ mod tests {
         config.path_separator = PathSeparatorOption::Backslash;
         let output = format_path_for_display(&path, DisplayPathInfo::None, &config).unwrap();
         assert_eq!(output.as_str(), r"\Foo\Bar\Baz\Bot");
-
-        config.path_separator = PathSeparatorOption::Auto;
-        let output = format_path_for_display(&path, DisplayPathInfo::None, &config).unwrap();
-        assert_eq!(
-            output.as_str(),
-            if cfg!(windows) {
-                r"\Foo\Bar\Baz\Bot"
-            } else {
-                "/Foo/Bar/Baz/Bot"
-            }
-        );
     }
 
     #[test]
@@ -1591,7 +1573,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn truncation_symbol_windows_root_truncated() -> io::Result<()> {
-        let dir = Path::new("C:\\temp");
+        let dir = Path::new(r"C:\temp\foo\bar");
         let actual = ModuleRenderer::new("directory")
             .config(toml::toml! {
                 [directory]
@@ -1600,7 +1582,7 @@ mod tests {
             })
             .path(dir)
             .collect();
-        let expected = Some(format!("{} ", Color::Cyan.bold().paint("…/temp")));
+        let expected = Some(format!("{} ", Color::Cyan.bold().paint("…/bar")));
         assert_eq!(expected, actual);
         Ok(())
     }
@@ -1608,7 +1590,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn truncation_symbol_windows_root_truncated_backslash() -> io::Result<()> {
-        let dir = Path::new("C:\\temp");
+        let dir = Path::new(r"C:\temp\foo\bar");
         let actual = ModuleRenderer::new("directory")
             .config(toml::toml! {
                 [directory]
@@ -1617,7 +1599,7 @@ mod tests {
             })
             .path(dir)
             .collect();
-        let expected = Some(format!("{} ", Color::Cyan.bold().paint("…\\temp")));
+        let expected = Some(format!("{} ", Color::Cyan.bold().paint(r"…\bar")));
         assert_eq!(expected, actual);
         Ok(())
     }
