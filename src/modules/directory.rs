@@ -841,7 +841,13 @@ mod tests {
         let dir = tmp_dir.path().join("starship");
         fs::create_dir_all(&dir)?;
 
-        let actual = ModuleRenderer::new("directory").path(dir).collect();
+        let actual = ModuleRenderer::new("directory")
+            .path(dir)
+            .config(toml::toml!{
+                [directory]
+                path_separator = "slash"
+            })
+            .collect();
         let expected = Some(format!(
             "{} ",
             Color::Cyan.bold().paint(format!("~/{}/starship", name))
@@ -1677,7 +1683,7 @@ mod tests {
 
         let expected = Some(format!(
             "{} ",
-            Color::Cyan.bold().paint("C:/Windows/System32")
+            Color::Cyan.bold().paint(r"C:\Windows\System32")
         ));
 
         let actual = ModuleRenderer::new("directory")
@@ -1685,6 +1691,7 @@ mod tests {
                 [directory]
                 use_logical_path = false
                 truncation_length = 0
+                path_separator = "backslash"
             })
             .path(sys32_path)
             .collect();
@@ -1699,11 +1706,9 @@ mod tests {
         // We expect this prefix to be trimmed before being rendered.
         let unc_path = Path::new(r"\\?\UNC\server\share\a\b\c");
 
-        // NOTE: path-slash doesn't convert slashes which are part of path prefixes under Windows,
-        // which is why the first part of this string still includes backslashes
         let expected = Some(format!(
             "{} ",
-            Color::Cyan.bold().paint(r"\\server\share/a/b/c")
+            Color::Cyan.bold().paint(r"\\server\share\a\b\c")
         ));
 
         let actual = ModuleRenderer::new("directory")
@@ -1711,6 +1716,7 @@ mod tests {
                 [directory]
                 use_logical_path = false
                 truncation_length = 0
+                path_separator = "backslash"
             })
             .path(unc_path)
             .collect();
