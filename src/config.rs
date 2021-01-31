@@ -85,7 +85,7 @@ impl<'a> ModuleConfig<'a> for u64 {
         match config {
             Value::Integer(value) => {
                 // Converting i64 to u64
-                if *value > 0 {
+                if *value >= 0 {
                     Some(*value as u64)
                 } else {
                     None
@@ -107,7 +107,7 @@ impl<'a> ModuleConfig<'a> for usize {
     fn from_config(config: &Value) -> Option<Self> {
         match config {
             Value::Integer(value) => {
-                if *value > 0 {
+                if *value >= 0 {
                     Some(*value as usize)
                 } else {
                     None
