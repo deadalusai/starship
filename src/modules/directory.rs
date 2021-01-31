@@ -3,6 +3,7 @@ use super::utils::directory_nix as directory_utils;
 #[cfg(target_os = "windows")]
 use super::utils::directory_win as directory_utils;
 use super::utils::path::{NormalizedPath, PathExt, PathKind};
+use indexmap::IndexMap;
 use std::fmt::Write;
 use std::path::Path;
 use unicode_segmentation::UnicodeSegmentation;
@@ -68,11 +69,11 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
         .unwrap_or_else(|| {
             // Fall back to the logical path, automatically contracting
             // the home directory if required.
-            contract_home_path(display_dir.normalize(), &home_dir, &config)
+            contract_home_path(display_dir.normalize(), &home_dir, config.home_symbol)
         });
 
     // Apply path substitutions
-    let (display_path, path_info) = match substitute_path(display_path, &config) {
+    let (display_path, path_info) = match substitute_path(display_path, &config.substitutions) {
         (path, DisplayPathInfo::None) => (path, path_info),
         (path, new_info) => (path, new_info),
     };
@@ -146,12 +147,12 @@ enum DisplayPathInfo {
 fn contract_home_path<'a>(
     mut path: NormalizedPath<'a>,
     home_path: &NormalizedPath,
-    config: &DirectoryConfig<'a>,
+    home_symbol: &str,
 ) -> (NormalizedPath<'a>, DisplayPathInfo) {
     if !home_path.is_absolute() || !path.starts_with(home_path) {
         return (path, DisplayPathInfo::None);
     }
-    let short_home_path = Path::new(config.home_symbol).normalize();
+    let short_home_path = Path::new(home_symbol).normalize();
     path.replace_sub_path(home_path, &short_home_path);
     (path, DisplayPathInfo::ContractedToHome)
 }
@@ -175,10 +176,10 @@ fn try_contract_repo_path<'a>(
 /// Applies the list of configured path substitutions to the path.
 fn substitute_path<'a>(
     mut path: NormalizedPath<'a>,
-    config: &DirectoryConfig,
+    substitutions: &IndexMap<String, &'a str>,
 ) -> (NormalizedPath<'a>, DisplayPathInfo) {
     let was_path_absolute = path.is_absolute();
-    for (sub_path, replacement) in config.substitutions.iter() {
+    for (sub_path, replacement) in substitutions.iter() {
         let sub_path = Path::new(sub_path).normalize();
         let replacement = Path::new(replacement).normalize();
         path.replace_sub_path(&sub_path, &replacement);
@@ -224,7 +225,6 @@ fn format_path_for_display(
         }
     };
     if print_truncation_symbol {
-        assert_eq!(path.kind, PathKind::Relative);
         // Write the truncation symbol if it is configured
         if !config.truncation_symbol.is_empty() {
             write!(buf, "{}", config.truncation_symbol)?;
@@ -251,20 +251,24 @@ fn format_path_for_display(
         }
     }
     // Fish-style path segment shortening
-    let last_segment_index = path.segments.len().saturating_sub(1);
     let apply_fish_shortening = config.fish_style_pwd_dir_length > 0;
+    let last_segment_index = path.segments.len().saturating_sub(1);
     // Path truncation
-    let skip_segments = path.segments.len().saturating_sub(config.truncation_length);
+    let first_segment_index = if config.truncation_length > 0 {
+        path.segments.len().saturating_sub(config.truncation_length)
+    } else {
+        0
+    };
     // Write out the remaining path segments, separated by
     // the configured path separator.
-    for (i, segment) in path.segments.iter().enumerate().skip(skip_segments) {
+    for (i, segment) in path.segments.iter().enumerate().skip(first_segment_index) {
         let mut segment = segment.as_ref();
         // Fish-style path segment shortening
         // See: https://fishshell.com/docs/current/cmds/prompt_pwd.html
         if apply_fish_shortening && i != last_segment_index {
             segment = fish_shorten_path_segment(segment, config.fish_style_pwd_dir_length);
         }
-        write!(buf, "{s}{p}", s = if i > 0 { sep } else { "" }, p = segment)?;
+        write!(buf, "{s}{p}", s = if i > first_segment_index { sep } else { "" }, p = segment)?;
     }
     Ok(buf)
 }
@@ -302,11 +306,13 @@ mod tests {
 
     #[test]
     fn contract_home_directory() {
-        let full_path = Path::new("/Users/astronaut/schematics/rocket");
-        let home = Path::new("/Users/astronaut");
+        let full_path = Path::new("/Users/astronaut/schematics/rocket").normalize();
+        let home_path = Path::new("/Users/astronaut").normalize();
 
-        let output = contract_path(full_path, home, "~");
-        assert_eq!(output, "~/schematics/rocket");
+        let (output, output_info) = contract_home_path(full_path, &home_path, "~");
+
+        assert_eq!(output, Path::new("~/schematics/rocket").normalize());
+        assert_eq!(output_info, DisplayPathInfo::ContractedToHome);
     }
 
     #[test]
@@ -321,8 +327,14 @@ mod tests {
         let repo_variations = [repo_dir.clone(), repo_dir.canonicalize().unwrap()];
         for src_dir in &src_variations {
             for repo_dir in &repo_variations {
-                let output = contract_repo_path(&src_dir, &repo_dir);
-                assert_eq!(output, Some("rocket-controls/src".to_string()));
+                let src_path = src_dir.normalize();
+                let repo_path = repo_dir.normalize();
+
+                let (output, output_info) =
+                    try_contract_repo_path(src_path, &repo_path).expect("expected success");
+
+                assert_eq!(output, Path::new("rocket-controls/src").normalize());
+                assert_eq!(output_info, DisplayPathInfo::ContractedToRepo);
             }
         }
 
@@ -339,11 +351,13 @@ mod tests {
         let home_path_variations = [r"\\?\C:\Users\astronaut", r"C:\Users\astronaut"];
         for path in &path_variations {
             for home_path in &home_path_variations {
-                let path = Path::new(path);
-                let home_path = Path::new(home_path);
+                let path = Path::new(path).normalize();
+                let home_path = Path::new(home_path).normalize();
 
-                let output = contract_path(path, home_path, "~");
-                assert_eq!(output, "~/schematics/rocket");
+                let (output, output_info) = contract_home_path(path, &home_path, "~");
+
+                assert_eq!(output, Path::new("~/schematics/rocket").normalize());
+                assert_eq!(output_info, DisplayPathInfo::ContractedToHome);
             }
         }
     }
@@ -351,44 +365,247 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn contract_windows_style_repo_directory() {
-        let full_path = Path::new("C:\\Users\\astronaut\\dev\\rocket-controls\\src");
-        let repo_root = Path::new("C:\\Users\\astronaut\\dev\\rocket-controls");
+        let full_path = Path::new("C:\\Users\\astronaut\\dev\\rocket-controls\\src").normalize();
+        let repo_root = Path::new("C:\\Users\\astronaut\\dev\\rocket-controls").normalize();
 
-        let output = contract_path(full_path, repo_root, "rocket-controls");
-        assert_eq!(output, "rocket-controls/src");
+        let (output, output_info) =
+            try_contract_repo_path(full_path, &repo_root).expect("expected success");
+
+        assert_eq!(output, Path::new("rocket-controls/src").normalize());
+        assert_eq!(output_info, DisplayPathInfo::ContractedToRepo);
     }
 
     #[test]
     #[cfg(target_os = "windows")]
     fn contract_windows_style_no_top_level_directory() {
-        let full_path = Path::new("C:\\Some\\Other\\Path");
-        let top_level_path = Path::new("C:\\Users\\astronaut");
+        let full_path = Path::new("C:\\Some\\Other\\Path").normalize();
+        let top_level_path = Path::new("C:\\Users\\astronaut").normalize();
 
-        let output = contract_path(full_path, top_level_path, "~");
-        assert_eq!(output, "C:/Some/Other/Path");
+        let (output, output_info) = contract_home_path(full_path, &top_level_path, "~");
+
+        assert_eq!(output, Path::new(r"C:\Some\Other\Path").normalize());
+        assert_eq!(output_info, DisplayPathInfo::None);
     }
 
     #[test]
     #[cfg(target_os = "windows")]
     fn contract_windows_style_root_directory() {
-        let full_path = Path::new("C:\\");
-        let top_level_path = Path::new("C:\\Users\\astronaut");
+        let full_path = Path::new("C:\\").normalize();
+        let top_level_path = Path::new("C:\\Users\\astronaut").normalize();
 
-        let output = contract_path(full_path, top_level_path, "~");
-        assert_eq!(output, "C:");
+        let (output, output_info) = contract_home_path(full_path, &top_level_path, "~");
+
+        assert_eq!(output, Path::new(r"C:\").normalize());
+        assert_eq!(output_info, DisplayPathInfo::None);
     }
 
     #[test]
     fn substitute_prefix_and_middle() {
-        let full_path = "/absolute/path/foo/bar/baz";
+        let full_path = Path::new("/absolute/path/foo/bar/baz").normalize();
         let mut substitutions = IndexMap::new();
         substitutions.insert("/absolute/path".to_string(), "");
         substitutions.insert("/bar/".to_string(), "/");
 
-        let output = substitute_path(full_path.to_string(), &substitutions);
-        assert_eq!(output, "/foo/baz");
+        let (output, output_info) = substitute_path(full_path, &substitutions);
+
+        assert_eq!(output, Path::new("foo/baz").normalize());
+        assert_eq!(output_info, DisplayPathInfo::ContractedBySubstitution);
     }
 
+    #[test]
+    fn fish_shorten_path_segment_test() {
+        let segments = [("foobarbaz", "f"), ("a̐éö̲", "a̐"), ("目录", "目")];
+        for (segment, expected) in segments.iter() {
+            let result = fish_shorten_path_segment(segment, 1);
+            assert_eq!(&result, expected);
+        }
+    }
+
+    #[test]
+    fn fish_shorten_path_segment_dot_prefix() {
+        let segments = [(".", "."), ("..", ".."), (".hidden", ".h")];
+        for (segment, expected) in segments.iter() {
+            let result = fish_shorten_path_segment(segment, 1);
+            assert_eq!(&result, expected);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn format_path_for_display_slash_config() {
+        let path = Path::new("/Foo/Bar/Baz/Bot").normalize();
+        let mut config = DirectoryConfig::new();
+        config.truncation_length = 0;
+
+        config.path_separator = PathSeparatorOption::Slash;
+        let output = format_path_for_display(&path, DisplayPathInfo::None, &config).unwrap();
+        assert_eq!(output.as_str(), "/Foo/Bar/Baz/Bot");
+
+        config.path_separator = PathSeparatorOption::Backslash;
+        let output = format_path_for_display(&path, DisplayPathInfo::None, &config).unwrap();
+        assert_eq!(output.as_str(), r"\Foo\Bar\Baz\Bot");
+
+        config.path_separator = PathSeparatorOption::Auto;
+        let output = format_path_for_display(&path, DisplayPathInfo::None, &config).unwrap();
+        assert_eq!(
+            output.as_str(),
+            if cfg!(windows) {
+                r"\Foo\Bar\Baz\Bot"
+            } else {
+                "/Foo/Bar/Baz/Bot"
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn format_path_for_display_windows_path_prefixes() {
+        let paths = [
+            // Relative
+            (r"Foo\Bar\Baz", "Foo/Bar/Baz"),
+            (r"\\?\Foo\Bar\Baz", "Foo/Bar/Baz"),
+            // Drive relative
+            (r"C:Foo\Bar\Baz", "C:Foo/Bar/Baz"),
+            (r"\\?\C:Foo\Bar\Baz", "C:Foo/Bar/Baz"),
+            // Absolute
+            (r"\Foo\Bar\Baz", "/Foo/Bar/Baz"),
+            (r"\\?\\Foo\Bar\Baz", "/Foo/Bar/Baz"),
+            // Absolute drive
+            (r"C:\Foo\Bar\Baz", "C:/Foo/Bar/Baz"),
+            (r"\\?\C:\Foo\Bar\Baz", "C:/Foo/Bar/Baz"),
+            // Absolute UNC
+            (r"\\Server\Share\Baz", "//Server/Share/Baz"),
+            (r"\\?\UNC\Server\Share\Baz", "//Server/Share/Baz"),
+            // Absolute device
+            (r"\\.\Device\Foo", "//./Device/Foo"),
+        ];
+
+        for (path, expected) in paths.iter() {
+            let path = Path::new(path).normalize();
+            let path_info = DisplayPathInfo::None;
+            let mut config = DirectoryConfig::new();
+            config.truncation_length = 0;
+            config.path_separator = PathSeparatorOption::Slash;
+
+            let output = format_path_for_display(&path, path_info, &config).unwrap();
+
+            assert_eq!(&output.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn format_path_for_display_fish_shortening() {
+        let path = Path::new("/Foo/Bar/Baz/Frob/Cash").normalize();
+        let path_info = DisplayPathInfo::None;
+        let mut config = DirectoryConfig::new();
+        config.truncation_length = 0;
+        config.fish_style_pwd_dir_length = 2;
+        config.path_separator = PathSeparatorOption::Slash;
+
+        let output = format_path_for_display(&path, path_info, &config).unwrap();
+
+        assert_eq!(output.as_str(), "/Fo/Ba/Ba/Fr/Cash");
+    }
+
+    #[test]
+    fn format_path_for_display_path_truncation() {
+        let path = Path::new("/Foo/Bar/Baz/Frob/Cash").normalize();
+        let path_info = DisplayPathInfo::None;
+        let mut config = DirectoryConfig::new();
+        config.truncation_length = 2;
+        config.truncation_symbol = "…";
+        config.path_separator = PathSeparatorOption::Slash;
+
+        let output = format_path_for_display(&path, path_info, &config).unwrap();
+
+        assert_eq!(output.as_str(), "…Frob/Cash");
+    }
+
+    #[test]
+    fn format_path_for_display_path_truncation_no_truncation_symbol() {
+        let path = Path::new("/Foo/Bar/Baz/Frob/Cash").normalize();
+        let path_info = DisplayPathInfo::None;
+        let mut config = DirectoryConfig::new();
+        config.truncation_length = 2;
+        config.truncation_symbol = "";
+        config.path_separator = PathSeparatorOption::Slash;
+
+        let output = format_path_for_display(&path, path_info, &config).unwrap();
+
+        assert_eq!(output.as_str(), "Frob/Cash");
+    }
+
+    #[test]
+    fn format_path_for_display_contracted_to_repo() {
+        let path = Path::new("repo-name/src").normalize();
+        let path_info = DisplayPathInfo::ContractedToRepo;
+        let mut config = DirectoryConfig::new();
+        config.truncation_length = 0;
+        config.truncation_symbol = "…";
+        config.path_separator = PathSeparatorOption::Slash;
+
+        let output = format_path_for_display(&path, path_info, &config).unwrap();
+
+        assert_eq!(output.as_str(), "…repo-name/src");
+    }
+
+    #[test]
+    fn format_path_for_display_contracted_to_repo_no_truncation_symbol() {
+        let path = Path::new("repo-name/src").normalize();
+        let path_info = DisplayPathInfo::ContractedToRepo;
+        let mut config = DirectoryConfig::new();
+        config.truncation_length = 0;
+        config.truncation_symbol = "";
+        config.path_separator = PathSeparatorOption::Slash;
+
+        let output = format_path_for_display(&path, path_info, &config).unwrap();
+
+        assert_eq!(output.as_str(), "repo-name/src");
+    }
+
+    #[test]
+    fn format_path_for_display_contracted_by_substitution() {
+        let path = Path::new("foo/bar/baz").normalize();
+        let path_info = DisplayPathInfo::ContractedBySubstitution;
+        let mut config = DirectoryConfig::new();
+        config.truncation_length = 0;
+        config.truncation_symbol = "…";
+        config.path_separator = PathSeparatorOption::Slash;
+
+        let output = format_path_for_display(&path, path_info, &config).unwrap();
+
+        assert_eq!(output.as_str(), "…foo/bar/baz");
+    }
+
+    #[test]
+    fn format_path_for_display_contracted_by_substitution_no_truncation_symbol() {
+        let path = Path::new("foo/bar/baz").normalize();
+        let path_info = DisplayPathInfo::ContractedBySubstitution;
+        let mut config = DirectoryConfig::new();
+        config.truncation_length = 0;
+        config.truncation_symbol = "";
+        config.path_separator = PathSeparatorOption::Slash;
+        
+        assert_eq!(path.kind, PathKind::Relative);
+
+        let output = format_path_for_display(&path, path_info, &config).unwrap();
+
+        assert_eq!(output.as_str(), "foo/bar/baz");
+    }
+
+    #[test]
+    fn format_path_for_display_contracted_to_home() {
+        let path = Path::new("~/foo/bar").normalize();
+        let path_info = DisplayPathInfo::ContractedToHome;
+        let mut config = DirectoryConfig::new();
+        config.path_separator = PathSeparatorOption::Slash;
+
+        let output = format_path_for_display(&path, path_info, &config).unwrap();
+
+        assert_eq!(output.as_str(), "~/foo/bar");
+    }
+
+    /*
     #[test]
     fn fish_style_with_user_home_contracted_path() {
         let path = "~/starship/engines/booster/rocket";
@@ -432,6 +649,7 @@ mod tests {
         let output = to_fish_style(1, path.to_string(), "目录");
         assert_eq!(output, "~/s/t/目/a̐/");
     }
+    */
 
     fn init_repo(path: &Path) -> io::Result<()> {
         Command::new("git")
@@ -727,7 +945,7 @@ mod tests {
             "{} ",
             Color::Cyan
                 .bold()
-                .paint(truncate(dir.to_slash_lossy(), 100))
+                .paint("TODO" /*truncate(dir.to_slash_lossy(), 100)*/)
         ));
 
         assert_eq!(expected, actual);
@@ -752,7 +970,7 @@ mod tests {
             "{} ",
             Color::Cyan
                 .bold()
-                .paint(to_fish_style(100, dir.to_slash_lossy(), ""))
+                .paint("TODO" /*to_fish_style(100, dir.to_slash_lossy(), "")*/)
         ));
 
         assert_eq!(expected, actual);
@@ -799,7 +1017,7 @@ mod tests {
             "{} ",
             Color::Cyan.bold().paint(format!(
                 "{}/thrusters/rocket",
-                to_fish_style(1, dir.to_slash_lossy(), "/thrusters/rocket")
+                "TODO" /*to_fish_style(1, dir.to_slash_lossy(), "/thrusters/rocket")*/
             ))
         ));
 
@@ -912,7 +1130,7 @@ mod tests {
             "{} ",
             Color::Cyan.bold().paint(format!(
                 "{}/above-repo/rocket-controls/src/meters/fuel-gauge",
-                to_fish_style(1, tmp_dir.path().to_slash_lossy(), "")
+                "TODO" /*to_fish_style(1, tmp_dir.path().to_slash_lossy(), "")*/
             ))
         ));
 
@@ -943,7 +1161,7 @@ mod tests {
             "{} ",
             Color::Cyan.bold().paint(format!(
                 "{}/rocket-controls/src/meters/fuel-gauge",
-                to_fish_style(1, tmp_dir.path().join("above-repo").to_slash_lossy(), "")
+                "TODO" /*to_fish_style(1, tmp_dir.path().join("above-repo").to_slash_lossy(), "")*/
             ))
         ));
 
@@ -1112,7 +1330,7 @@ mod tests {
             "{} ",
             Color::Cyan.bold().paint(format!(
                 "{}/above-repo/rocket-controls-symlink/src/meters/fuel-gauge",
-                to_fish_style(1, tmp_dir.path().to_slash_lossy(), "")
+                "TODO" /*to_fish_style(1, tmp_dir.path().to_slash_lossy(), "")*/
             ))
         ));
 
@@ -1149,7 +1367,7 @@ mod tests {
             "{} ",
             Color::Cyan.bold().paint(format!(
                 "{}/rocket-controls-symlink/src/meters/fuel-gauge",
-                to_fish_style(1, tmp_dir.path().join("above-repo").to_slash_lossy(), "")
+                "TODO" /*to_fish_style(1, tmp_dir.path().join("above-repo").to_slash_lossy(), "")*/
             ))
         ));
 

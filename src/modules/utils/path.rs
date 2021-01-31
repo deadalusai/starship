@@ -7,7 +7,7 @@ pub enum PathKind {
     Relative,
     /// Relative path with Windows disk/drive prefix e.g. `C:` or `\\?\C:`
     ///
-    /// TODO: Need to confirm we need to handle this case one.
+    /// TODO: Need to confirm we need to handle this case.
     /// RelativeDrive paths can only really be interpreted when changing directories,
     /// E.g.
     ///     > cd D:foo/bar
@@ -21,6 +21,9 @@ pub enum PathKind {
     /// Windows' UNC path, e.g. `\\server\share` or `\\?\UNC\server\share`
     AbsoluteUnc,
     /// Windows device path. e.g. \\.\COM42
+    ///
+    /// TODO: Need to confirm we need to handle this case.
+    /// Can you navigate a shell to a device path?
     AbsoluteDevice,
 }
 
@@ -367,10 +370,7 @@ mod windows {
 
         // abs path, abs sub path, abs replacement
         let mut path = abs_path.clone();
-        assert_eq!(
-            path.replace_sub_path(&abs_sub_path, &abs_replacement),
-            true
-        );
+        assert_eq!(path.replace_sub_path(&abs_sub_path, &abs_replacement), true);
         assert_eq!(path.kind, abs_replacement.kind); // kind replaced
         assert_eq!(&path.segments, &["x", "y", "z", "c", "d"]);
 
@@ -384,10 +384,7 @@ mod windows {
 
         // abs path, rel sub path, rel replacement
         let mut path = abs_path.clone();
-        assert_eq!(
-            path.replace_sub_path(&rel_sub_path, &rel_replacement),
-            true
-        );
+        assert_eq!(path.replace_sub_path(&rel_sub_path, &rel_replacement), true);
         assert_eq!(path.kind, abs_path.kind); // kind unchanged
         assert_eq!(&path.segments, &["a", "x", "y", "z", "d"]);
 
@@ -409,10 +406,7 @@ mod windows {
 
         // rel path, rel sub path, rel replacement
         let mut path = rel_path.clone();
-        assert_eq!(
-            path.replace_sub_path(&rel_sub_path, &rel_replacement),
-            true
-        );
+        assert_eq!(path.replace_sub_path(&rel_sub_path, &rel_replacement), true);
         assert_eq!(path.kind, rel_path.kind); // kind unchanged
         assert_eq!(&path.segments, &["a", "x", "y", "z", "d"]);
     }
@@ -495,10 +489,7 @@ mod nix {
 
         // abs path, abs sub path, abs replacement
         let mut path = abs_path.clone();
-        assert_eq!(
-            path.replace_sub_path(&abs_sub_path, &abs_replacement),
-            true
-        );
+        assert_eq!(path.replace_sub_path(&abs_sub_path, &abs_replacement), true);
         assert_eq!(path.kind, abs_replacement.kind); // kind replaced
         assert_eq!(&path.segments, &["x", "y", "z", "c", "d"]);
 
@@ -512,10 +503,7 @@ mod nix {
 
         // abs path, rel sub path, rel replacement
         let mut path = abs_path.clone();
-        assert_eq!(
-            path.replace_sub_path(&rel_sub_path, &rel_replacement),
-            true
-        );
+        assert_eq!(path.replace_sub_path(&rel_sub_path, &rel_replacement), true);
         assert_eq!(path.kind, abs_path.kind); // kind unchanged
         assert_eq!(&path.segments, &["a", "x", "y", "z", "d"]);
 
@@ -537,10 +525,7 @@ mod nix {
 
         // rel path, rel sub path, rel replacement
         let mut path = rel_path.clone();
-        assert_eq!(
-            path.replace_sub_path(&rel_sub_path, &rel_replacement),
-            true
-        );
+        assert_eq!(path.replace_sub_path(&rel_sub_path, &rel_replacement), true);
         assert_eq!(path.kind, rel_path.kind); // kind unchanged
         assert_eq!(&path.segments, &["a", "x", "y", "z", "d"]);
     }
