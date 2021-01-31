@@ -152,7 +152,7 @@ fn contract_home_path<'a>(
         return (path, DisplayPathInfo::None);
     }
     let short_home_path = Path::new(config.home_symbol).normalize();
-    path.try_replace_sub_path(home_path, &short_home_path);
+    path.replace_sub_path(home_path, &short_home_path);
     (path, DisplayPathInfo::ContractedToHome)
 }
 
@@ -168,7 +168,7 @@ fn try_contract_repo_path<'a>(
     // starting from the repo root
     let repo_name = repo_root.segments.iter().last().expect("repo name");
     let short_repo_path = Path::new(repo_name.as_ref()).normalize();
-    path.try_replace_sub_path(repo_root, &short_repo_path);
+    path.replace_sub_path(repo_root, &short_repo_path);
     Some((path, DisplayPathInfo::ContractedToRepo))
 }
 
@@ -181,7 +181,7 @@ fn substitute_path<'a>(
     for (sub_path, replacement) in config.substitutions.iter() {
         let sub_path = Path::new(sub_path).normalize();
         let replacement = Path::new(replacement).normalize();
-        path.try_replace_sub_path(&sub_path, &replacement);
+        path.replace_sub_path(&sub_path, &replacement);
     }
     let info = if was_path_absolute && !path.is_absolute() {
         DisplayPathInfo::ContractedBySubstitution

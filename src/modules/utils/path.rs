@@ -56,7 +56,7 @@ impl<'a> NormalizedPath<'a> {
         self.kind == other.kind && self.segments.starts_with(&other.segments)
     }
 
-    pub fn try_replace_sub_path(
+    pub fn replace_sub_path(
         &mut self,
         sub_path: &NormalizedPath,
         replacement_path: &NormalizedPath,
@@ -356,7 +356,7 @@ mod windows {
     }
 
     #[test]
-    fn try_replace_sub_path() {
+    fn replace_sub_path() {
         let abs_path = Path::new(r"C:\a\b\c\d").normalize();
         let abs_sub_path = Path::new(r"C:\a\b").normalize();
         let abs_replacement = Path::new(r"D:\x\y\z").normalize();
@@ -368,7 +368,7 @@ mod windows {
         // abs path, abs sub path, abs replacement
         let mut path = abs_path.clone();
         assert_eq!(
-            path.try_replace_sub_path(&abs_sub_path, &abs_replacement),
+            path.replace_sub_path(&abs_sub_path, &abs_replacement),
             true
         );
         assert_eq!(path.kind, abs_replacement.kind); // kind replaced
@@ -377,7 +377,7 @@ mod windows {
         // abs path, rel sub path, abs replacement
         let mut path = abs_path.clone();
         assert_eq!(
-            path.try_replace_sub_path(&rel_sub_path, &abs_replacement),
+            path.replace_sub_path(&rel_sub_path, &abs_replacement),
             false
         );
         assert_eq!(path, abs_path); // unchanged
@@ -385,7 +385,7 @@ mod windows {
         // abs path, rel sub path, rel replacement
         let mut path = abs_path.clone();
         assert_eq!(
-            path.try_replace_sub_path(&rel_sub_path, &rel_replacement),
+            path.replace_sub_path(&rel_sub_path, &rel_replacement),
             true
         );
         assert_eq!(path.kind, abs_path.kind); // kind unchanged
@@ -394,7 +394,7 @@ mod windows {
         // rel path, abs sub path, abs replacement
         let mut path = rel_path.clone();
         assert_eq!(
-            path.try_replace_sub_path(&abs_sub_path, &abs_replacement),
+            path.replace_sub_path(&abs_sub_path, &abs_replacement),
             false
         );
         assert_eq!(path, rel_path); // unchanged (unable to match abs sub path)
@@ -402,7 +402,7 @@ mod windows {
         // rel path, rel sub path, abs replacement
         let mut path = rel_path.clone();
         assert_eq!(
-            path.try_replace_sub_path(&rel_sub_path, &abs_replacement),
+            path.replace_sub_path(&rel_sub_path, &abs_replacement),
             false
         );
         assert_eq!(path, rel_path); // unchanged (unable to replace rel sub path with abs path)
@@ -410,7 +410,7 @@ mod windows {
         // rel path, rel sub path, rel replacement
         let mut path = rel_path.clone();
         assert_eq!(
-            path.try_replace_sub_path(&rel_sub_path, &rel_replacement),
+            path.replace_sub_path(&rel_sub_path, &rel_replacement),
             true
         );
         assert_eq!(path.kind, rel_path.kind); // kind unchanged
@@ -484,7 +484,7 @@ mod nix {
     }
 
     #[test]
-    fn try_replace_sub_path() {
+    fn replace_sub_path() {
         let abs_path = Path::new(r"/a/b/c/d").normalize();
         let abs_sub_path = Path::new(r"/a/b").normalize();
         let abs_replacement = Path::new(r"/x/y/z").normalize();
@@ -496,7 +496,7 @@ mod nix {
         // abs path, abs sub path, abs replacement
         let mut path = abs_path.clone();
         assert_eq!(
-            path.try_replace_sub_path(&abs_sub_path, &abs_replacement),
+            path.replace_sub_path(&abs_sub_path, &abs_replacement),
             true
         );
         assert_eq!(path.kind, abs_replacement.kind); // kind replaced
@@ -505,7 +505,7 @@ mod nix {
         // abs path, rel sub path, abs replacement
         let mut path = abs_path.clone();
         assert_eq!(
-            path.try_replace_sub_path(&rel_sub_path, &abs_replacement),
+            path.replace_sub_path(&rel_sub_path, &abs_replacement),
             false
         );
         assert_eq!(path, abs_path); // unchanged
@@ -513,7 +513,7 @@ mod nix {
         // abs path, rel sub path, rel replacement
         let mut path = abs_path.clone();
         assert_eq!(
-            path.try_replace_sub_path(&rel_sub_path, &rel_replacement),
+            path.replace_sub_path(&rel_sub_path, &rel_replacement),
             true
         );
         assert_eq!(path.kind, abs_path.kind); // kind unchanged
@@ -522,7 +522,7 @@ mod nix {
         // rel path, abs sub path, abs replacement
         let mut path = rel_path.clone();
         assert_eq!(
-            path.try_replace_sub_path(&abs_sub_path, &abs_replacement),
+            path.replace_sub_path(&abs_sub_path, &abs_replacement),
             false
         );
         assert_eq!(path, rel_path); // unchanged (unable to match abs sub path)
@@ -530,7 +530,7 @@ mod nix {
         // rel path, rel sub path, abs replacement
         let mut path = rel_path.clone();
         assert_eq!(
-            path.try_replace_sub_path(&rel_sub_path, &abs_replacement),
+            path.replace_sub_path(&rel_sub_path, &abs_replacement),
             false
         );
         assert_eq!(path, rel_path); // unchanged (unable to replace rel sub path with abs path)
@@ -538,7 +538,7 @@ mod nix {
         // rel path, rel sub path, rel replacement
         let mut path = rel_path.clone();
         assert_eq!(
-            path.try_replace_sub_path(&rel_sub_path, &rel_replacement),
+            path.replace_sub_path(&rel_sub_path, &rel_replacement),
             true
         );
         assert_eq!(path.kind, rel_path.kind); // kind unchanged
