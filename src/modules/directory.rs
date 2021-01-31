@@ -23,7 +23,7 @@ use crate::formatter::StringFormatter;
 /// - Paths containing a git repo will contract to begin at the repo root
 ///
 /// **Substitution**
-/// Paths will undergo user-provided substitutions of substrings
+/// Paths will undergo user-provided substitutions of sub-paths
 ///
 /// **Truncation**
 /// Paths will be limited in length to `3` path components by default.
@@ -35,7 +35,7 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     let home_dir = home_dir.normalize();
 
     let physical_dir = &context.current_dir;
-    let current_dir = if config.use_logical_path {
+    let display_dir = if config.use_logical_path {
         &context.logical_dir
     } else {
         &context.current_dir
@@ -43,7 +43,7 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
 
     log::debug!("Home dir: {:?}", &home_dir);
     log::debug!("Physical dir: {:?}", &physical_dir);
-    log::debug!("Current dir: {:?}", &current_dir);
+    log::debug!("Display dir: {:?}", &display_dir);
 
     // Attempt repository path contraction (if we are in a git repository)
     let repo = if config.truncate_to_repo {
@@ -51,8 +51,7 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     } else {
         None
     };
-
-    let display_path = repo
+    let (display_path, path_info) = repo
         .and_then(|repo| repo.root.as_ref())
         .and_then(|repo_root| {
             let repo_root = repo_root.normalize();
@@ -64,18 +63,25 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
             // NOTE: Always attempt to contract repo paths from the physical dir as
             // the logical dir _may_ not be be a valid physical disk
             // path and may not include the repo path prefix.
-            contract_repo_path(physical_dir.normalize(), &repo_root)
+            try_contract_repo_path(physical_dir.normalize(), &repo_root)
         })
         .unwrap_or_else(|| {
             // Fall back to the logical path, automatically contracting
             // the home directory if required.
-            contract_home_path(current_dir.normalize(), &home_dir, &config)
+            contract_home_path(display_dir.normalize(), &home_dir, &config)
         });
 
     // Apply path substitutions
-    let display_path = substitute_path(display_path, &config);
+    let (display_path, path_info) = match substitute_path(display_path, &config) {
+        (path, DisplayPathInfo::None) => (path, path_info),
+        (path, new_info) => (path, new_info),
+    };
 
-    let formatted_path = format_path_for_display(&display_path, &config).expect("formatted path");
+    log::debug!("Display path: {:?}", display_path);
+    log::debug!("Display path info: {:?}", path_info);
+
+    let formatted_path =
+        format_path_for_display(&display_path, path_info, &config).expect("formatted path");
     let lock_symbol = String::from(config.read_only);
 
     let parsed = StringFormatter::new(config.format).and_then(|formatter| {
@@ -124,25 +130,37 @@ fn is_readonly_dir(path: &Path) -> bool {
     }
 }
 
+// When we manipulate the display path
+// we keep track of what caused the path to be
+// made relative/contracted in order
+// to apply special formatting later on.
+#[derive(Debug, PartialEq, Eq)]
+enum DisplayPathInfo {
+    None,
+    ContractedToHome,
+    ContractedToRepo,
+    ContractedBySubstitution,
+}
+
 // Attempts to contract the path to the home path.
 fn contract_home_path<'a>(
     mut path: NormalizedPath<'a>,
     home_path: &NormalizedPath,
     config: &DirectoryConfig<'a>,
-) -> NormalizedPath<'a> {
+) -> (NormalizedPath<'a>, DisplayPathInfo) {
     if !home_path.is_absolute() || !path.starts_with(home_path) {
-        return path;
+        return (path, DisplayPathInfo::None);
     }
     let short_home_path = Path::new(config.home_symbol).normalize();
     path.try_replace_sub_path(home_path, &short_home_path);
-    path
+    (path, DisplayPathInfo::ContractedToHome)
 }
 
 // Attempts to contract the path to the given repository root.
-fn contract_repo_path<'a>(
+fn try_contract_repo_path<'a>(
     mut path: NormalizedPath<'a>,
     repo_root: &NormalizedPath<'a>,
-) -> Option<NormalizedPath<'a>> {
+) -> Option<(NormalizedPath<'a>, DisplayPathInfo)> {
     if !repo_root.is_absolute() || !path.starts_with(repo_root) {
         return None;
     }
@@ -151,32 +169,37 @@ fn contract_repo_path<'a>(
     let repo_name = repo_root.segments.iter().last().expect("repo name");
     let short_repo_path = Path::new(repo_name.as_ref()).normalize();
     path.try_replace_sub_path(repo_root, &short_repo_path);
-    Some(path)
+    Some((path, DisplayPathInfo::ContractedToRepo))
 }
 
-/// Apply the list of sub-path substitutions on the path.
-///
-/// Given a list of (from, to) pairs, this will perform the path
-/// substitutions in order on the path.
-///
-/// Any non-pair of is ignored.
+/// Applies the list of configured path substitutions to the path.
 fn substitute_path<'a>(
     mut path: NormalizedPath<'a>,
     config: &DirectoryConfig,
-) -> NormalizedPath<'a> {
+) -> (NormalizedPath<'a>, DisplayPathInfo) {
+    let was_path_absolute = path.is_absolute();
     for (sub_path, replacement) in config.substitutions.iter() {
         let sub_path = Path::new(sub_path).normalize();
         let replacement = Path::new(replacement).normalize();
         path.try_replace_sub_path(&sub_path, &replacement);
     }
-    path
+    let info = if was_path_absolute && !path.is_absolute() {
+        DisplayPathInfo::ContractedBySubstitution
+    } else {
+        DisplayPathInfo::None
+    };
+    (path, info)
 }
 
 /// Formats the path for final display.
 ///
-/// Fish-style path segment shortening is applied by this routine.
+/// This routine handles:
+/// - Custom path separator rendering
+/// - Path truncation
+/// - Fish-style path segment shortening
 fn format_path_for_display(
     path: &NormalizedPath,
+    path_info: DisplayPathInfo,
     config: &DirectoryConfig,
 ) -> Result<String, std::fmt::Error> {
     let sep = match config.path_separator {
@@ -191,8 +214,17 @@ fn format_path_for_display(
         PathSeparatorOption::Backslash => r"\",
     };
     let mut buf = String::new();
-    // Are we applying path truncation?
-    if config.truncation_length != 0 && config.truncation_length < path.segments.len() {
+    // Did we apply / are we applying path truncation?
+    let print_truncation_symbol = match path_info {
+        DisplayPathInfo::ContractedBySubstitution => true,
+        DisplayPathInfo::ContractedToRepo => true,
+        _ => {
+            let len = config.truncation_length;
+            len != 0 && len < path.segments.len()
+        }
+    };
+    if print_truncation_symbol {
+        assert_eq!(path.kind, PathKind::Relative);
         // Write the truncation symbol if it is configured
         if !config.truncation_symbol.is_empty() {
             write!(buf, "{}", config.truncation_symbol)?;
@@ -223,6 +255,8 @@ fn format_path_for_display(
     let apply_fish_shortening = config.fish_style_pwd_dir_length > 0;
     // Path truncation
     let skip_segments = path.segments.len().saturating_sub(config.truncation_length);
+    // Write out the remaining path segments, separated by
+    // the configured path separator.
     for (i, segment) in path.segments.iter().enumerate().skip(skip_segments) {
         let mut segment = segment.as_ref();
         // Fish-style path segment shortening

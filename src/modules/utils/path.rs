@@ -6,6 +6,13 @@ pub enum PathKind {
     /// No prefix/relative path fragment, e.g. `cat_pics` or `\\?\cat_pics`
     Relative,
     /// Relative path with Windows disk/drive prefix e.g. `C:` or `\\?\C:`
+    ///
+    /// TODO: Need to confirm we need to handle this case one.
+    /// RelativeDrive paths can only really be interpreted when changing directories,
+    /// E.g.
+    ///     > cd D:foo/bar
+    /// Changes to the D drive, then changes to the foo/bar directory relative to the PWD on that drive.
+    /// Having changed directories, your actual PWD would be (something like) "D:/root/foo/bar"
     RelativeDrive(char),
     /// Absolute path e.g. `/foo` or `\foo`
     Absolute,
@@ -66,7 +73,7 @@ impl<'a> NormalizedPath<'a> {
             return true;
         }
         if !replacement_path.is_absolute() {
-            // Can't insert an absolute path to into the middle.
+            // Can't insert an absolute path to into the middle of another path.
             return false;
         }
         // Search for the sub-sequence to replace
