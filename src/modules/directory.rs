@@ -267,17 +267,18 @@ fn format_path_for_display(
 }
 
 /// Applies fish-style path segment contraction to a segment
+/// See: https://fishshell.com/docs/current/cmds/prompt_pwd.html
 fn fish_shorten_path_segment(segment: &str, short_len: usize) -> &str {
-    let mut graphemes = UnicodeSegmentation::grapheme_indices(segment, true);
+    let mut graphemes = segment.grapheme_indices(true);
     let end = match graphemes.next() {
         // Always include the leading period on .-prefixed
         // segments (., .., .hidden, etc)
-        Some((_, ".")) => graphemes.take(short_len).last(),
-        Some(_) => graphemes.take(short_len - 1).last(),
+        Some((_, ".")) => graphemes.skip(short_len).next(),
+        Some((_, _)) => graphemes.skip(short_len - 1).next(),
         None => None,
     };
     if let Some((end, _)) = end {
-        return &segment[..=end];
+        return &segment[..end];
     }
     segment
 }
@@ -407,18 +408,33 @@ mod tests {
 
     #[test]
     fn fish_shorten_path_segment_test() {
-        let segments = [("foobarbaz", "f"), ("a̐éö̲", "a̐"), ("目录", "目")];
-        for (segment, expected) in segments.iter() {
-            let result = fish_shorten_path_segment(segment, 1);
+        let specs = [
+            (1, "foobarbaz", "f"),
+            (1, "a̐éö̲", "a̐"),
+            (1, "目录", "目"),
+            (2, "foobarbaz", "fo"),
+            (2, "a̐éö̲", "a̐é"),
+            (2, "目录", "目录"),
+            (3, "foobarbaz", "foo"),
+            (3, "a̐éö̲", "a̐éö̲"),
+            (3, "目录", "目录"),
+        ];
+        for (len, segment, expected) in specs.iter() {
+            let result = fish_shorten_path_segment(segment, *len);
             assert_eq!(&result, expected);
         }
     }
 
     #[test]
     fn fish_shorten_path_segment_dot_prefix() {
-        let segments = [(".", "."), ("..", ".."), (".hidden", ".h")];
-        for (segment, expected) in segments.iter() {
-            let result = fish_shorten_path_segment(segment, 1);
+        let specs = [
+            (1, ".", "."),
+            (1, "..", ".."),
+            (1, ".hidden", ".h"),
+            (3, ".hidden", ".hid"),
+        ];
+        for (len, segment, expected) in specs.iter() {
+            let result = fish_shorten_path_segment(segment, *len);
             assert_eq!(&result, expected);
         }
     }

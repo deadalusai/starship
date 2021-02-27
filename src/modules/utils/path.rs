@@ -75,7 +75,7 @@ impl<'a> NormalizedPath<'a> {
             self.kind = replacement_path.kind;
             return true;
         }
-        if !replacement_path.is_absolute() {
+        if replacement_path.is_absolute() {
             // Can't insert an absolute path to into the middle of another path.
             return false;
         }
