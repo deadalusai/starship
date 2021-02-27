@@ -3,24 +3,6 @@ use indexmap::IndexMap;
 
 use starship_module_config_derive::ModuleConfig;
 
-#[derive(Clone, PartialEq, Eq)]
-pub enum PathSeparatorOption {
-    /// (Default) E.g. `/`
-    Slash,
-    /// E.g. `\`
-    Backslash,
-}
-
-impl<'a> ModuleConfig<'a> for PathSeparatorOption {
-    fn from_config(config: &toml::Value) -> Option<Self> {
-        match config.as_str() {
-            Some("slash") => Some(PathSeparatorOption::Slash),
-            Some("backslash") => Some(PathSeparatorOption::Backslash),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Clone, ModuleConfig)]
 pub struct DirectoryConfig<'a> {
     pub truncation_length: usize,
@@ -28,7 +10,7 @@ pub struct DirectoryConfig<'a> {
     pub substitutions: IndexMap<String, &'a str>,
     pub fish_style_pwd_dir_length: usize,
     pub use_logical_path: bool,
-    pub path_separator: PathSeparatorOption,
+    pub path_separator: Option<&'a str>,
     pub format: &'a str,
     pub style: &'a str,
     pub disabled: bool,
@@ -45,7 +27,7 @@ impl<'a> RootModuleConfig<'a> for DirectoryConfig<'a> {
             truncate_to_repo: true,
             fish_style_pwd_dir_length: 0,
             use_logical_path: true,
-            path_separator: PathSeparatorOption::Slash,
+            path_separator: None,
             substitutions: IndexMap::new(),
             format: "[$path]($style)[$read_only]($read_only_style) ",
             style: "cyan bold",

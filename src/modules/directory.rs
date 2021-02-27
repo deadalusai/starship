@@ -11,7 +11,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::{Context, Module};
 
 use crate::config::RootModuleConfig;
-use crate::configs::directory::{DirectoryConfig, PathSeparatorOption};
+use crate::configs::directory::DirectoryConfig;
 use crate::formatter::StringFormatter;
 
 /// Creates a module with the current logical or physical directory
@@ -203,24 +203,36 @@ fn format_path_for_display(
     path_info: DisplayPathInfo,
     config: &DirectoryConfig,
 ) -> Result<String, std::fmt::Error> {
-    let sep = match config.path_separator {
-        PathSeparatorOption::Slash => r"/",
-        PathSeparatorOption::Backslash => r"\",
+    let sep = config
+        .path_separator
+        .unwrap_or_else(|| if cfg!(windows) { r"\" } else { r"/" });
+    // Determine truncation behaviors
+    let use_fish_shortening = config.fish_style_pwd_dir_length > 0;
+    let first_untruncated_segment = if config.truncation_length > 0 {
+        path.segments.len().saturating_sub(config.truncation_length)
+    } else {
+        0
     };
-    let mut buf = String::new();
-    // Did we apply / are we applying path truncation?
+    // Determine if we should indicate that the path was "truncated"
+    // - either by an earlier path substitution step or by skipping segments
+    // in the print loop below.
     let print_truncation_symbol = match path_info {
         DisplayPathInfo::ContractedBySubstitution => true,
         DisplayPathInfo::ContractedToRepo => true,
-        _ => {
-            let len = config.truncation_length;
-            len != 0 && len < path.segments.len()
+        DisplayPathInfo::ContractedToHome |
+        DisplayPathInfo::None => {
+            if use_fish_shortening {
+                false
+            } else {
+                first_untruncated_segment != 0
+            }
         }
     };
+    let mut buf = String::new();
     if print_truncation_symbol {
         // Write the truncation symbol if it is configured
         if !config.truncation_symbol.is_empty() {
-            write!(buf, "{}", config.truncation_symbol)?;
+            write!(buf, "{}{s}", config.truncation_symbol, s = sep)?;
         }
     } else {
         // Write the start of the path, if there is one.
@@ -243,25 +255,25 @@ fn format_path_for_display(
             }
         }
     }
-    // Fish-style path segment shortening
-    let apply_fish_shortening = config.fish_style_pwd_dir_length > 0;
-    let last_segment_index = path.segments.len().saturating_sub(1);
-    // Path truncation
-    let first_segment_index = if config.truncation_length > 0 {
-        path.segments.len().saturating_sub(config.truncation_length)
-    } else {
-        0
-    };
     // Write out the remaining path segments, separated by
     // the configured path separator.
-    for (i, segment) in path.segments.iter().enumerate().skip(first_segment_index) {
+    let mut first_segment_written = false;
+    for (i, segment) in path.segments.iter().enumerate() {
         let mut segment = segment.as_ref();
-        // Fish-style path segment shortening
-        // See: https://fishshell.com/docs/current/cmds/prompt_pwd.html
-        if apply_fish_shortening && i != last_segment_index {
-            segment = fish_shorten_path_segment(segment, config.fish_style_pwd_dir_length);
+        if i < first_untruncated_segment {
+            if use_fish_shortening {
+                // Apply fish-style segment shortening to truncated segments
+                segment = fish_shorten_path_segment(segment, config.fish_style_pwd_dir_length);
+            } else {
+                // Skip truncated segments
+                continue;
+            }
         }
-        write!(buf, "{s}{p}", s = if i > first_segment_index { sep } else { "" }, p = segment)?;
+        if first_segment_written {
+            write!(buf, "{}", sep)?;
+        }
+        write!(buf, "{}", segment)?;
+        first_segment_written = true;
     }
     Ok(buf)
 }
@@ -398,7 +410,7 @@ mod tests {
         let full_path = Path::new("/absolute/path/foo/bar/baz").normalize();
         let mut substitutions = IndexMap::new();
         substitutions.insert("/absolute/path".to_string(), "");
-        substitutions.insert("/bar/".to_string(), "/");
+        substitutions.insert("bar".to_string(), "");
 
         let (output, output_info) = substitute_path(full_path, &substitutions);
 
@@ -440,19 +452,25 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn format_path_for_display_slash_config() {
         let path = Path::new("/Foo/Bar/Baz/Bot").normalize();
         let mut config = DirectoryConfig::new();
         config.truncation_length = 0;
 
-        config.path_separator = PathSeparatorOption::Slash;
+        // Default for OS
+        config.path_separator = None;
         let output = format_path_for_display(&path, DisplayPathInfo::None, &config).unwrap();
-        assert_eq!(output.as_str(), "/Foo/Bar/Baz/Bot");
+        let expected = if cfg!(windows) {
+            r"\Foo\Bar\Baz\Bot"
+        } else {
+            r"/Foo/Bar/Baz/Bot"
+        };
+        assert_eq!(output.as_str(), expected);
 
-        config.path_separator = PathSeparatorOption::Backslash;
+        // Override
+        config.path_separator = Some(r"___");
         let output = format_path_for_display(&path, DisplayPathInfo::None, &config).unwrap();
-        assert_eq!(output.as_str(), r"\Foo\Bar\Baz\Bot");
+        assert_eq!(output.as_str(), r"___Foo___Bar___Baz___Bot");
     }
 
     #[test]
@@ -483,7 +501,7 @@ mod tests {
             let path_info = DisplayPathInfo::None;
             let mut config = DirectoryConfig::new();
             config.truncation_length = 0;
-            config.path_separator = PathSeparatorOption::Slash;
+            config.path_separator = Some("/");
 
             let output = format_path_for_display(&path, path_info, &config).unwrap();
 
@@ -496,9 +514,9 @@ mod tests {
         let path = Path::new("/Foo/Bar/Baz/Frob/Cash").normalize();
         let path_info = DisplayPathInfo::None;
         let mut config = DirectoryConfig::new();
-        config.truncation_length = 0;
+        config.truncation_length = 1;
         config.fish_style_pwd_dir_length = 2;
-        config.path_separator = PathSeparatorOption::Slash;
+        config.path_separator = Some("/");
 
         let output = format_path_for_display(&path, path_info, &config).unwrap();
 
@@ -512,11 +530,11 @@ mod tests {
         let mut config = DirectoryConfig::new();
         config.truncation_length = 2;
         config.truncation_symbol = "…";
-        config.path_separator = PathSeparatorOption::Slash;
+        config.path_separator = Some("/");
 
         let output = format_path_for_display(&path, path_info, &config).unwrap();
 
-        assert_eq!(output.as_str(), "…Frob/Cash");
+        assert_eq!(output.as_str(), "…/Frob/Cash");
     }
 
     #[test]
@@ -526,7 +544,7 @@ mod tests {
         let mut config = DirectoryConfig::new();
         config.truncation_length = 2;
         config.truncation_symbol = "";
-        config.path_separator = PathSeparatorOption::Slash;
+        config.path_separator = Some("/");
 
         let output = format_path_for_display(&path, path_info, &config).unwrap();
 
@@ -540,11 +558,11 @@ mod tests {
         let mut config = DirectoryConfig::new();
         config.truncation_length = 0;
         config.truncation_symbol = "…";
-        config.path_separator = PathSeparatorOption::Slash;
+        config.path_separator = Some("/");
 
         let output = format_path_for_display(&path, path_info, &config).unwrap();
 
-        assert_eq!(output.as_str(), "…repo-name/src");
+        assert_eq!(output.as_str(), "…/repo-name/src");
     }
 
     #[test]
@@ -554,7 +572,7 @@ mod tests {
         let mut config = DirectoryConfig::new();
         config.truncation_length = 0;
         config.truncation_symbol = "";
-        config.path_separator = PathSeparatorOption::Slash;
+        config.path_separator = Some("/");
 
         let output = format_path_for_display(&path, path_info, &config).unwrap();
 
@@ -568,11 +586,11 @@ mod tests {
         let mut config = DirectoryConfig::new();
         config.truncation_length = 0;
         config.truncation_symbol = "…";
-        config.path_separator = PathSeparatorOption::Slash;
+        config.path_separator = Some("/");
 
         let output = format_path_for_display(&path, path_info, &config).unwrap();
 
-        assert_eq!(output.as_str(), "…foo/bar/baz");
+        assert_eq!(output.as_str(), "…/foo/bar/baz");
     }
 
     #[test]
@@ -582,8 +600,8 @@ mod tests {
         let mut config = DirectoryConfig::new();
         config.truncation_length = 0;
         config.truncation_symbol = "";
-        config.path_separator = PathSeparatorOption::Slash;
-        
+        config.path_separator = Some("/");
+
         assert_eq!(path.kind, PathKind::Relative);
 
         let output = format_path_for_display(&path, path_info, &config).unwrap();
@@ -596,7 +614,7 @@ mod tests {
         let path = Path::new("~/foo/bar").normalize();
         let path_info = DisplayPathInfo::ContractedToHome;
         let mut config = DirectoryConfig::new();
-        config.path_separator = PathSeparatorOption::Slash;
+        config.path_separator = Some("/");
 
         let output = format_path_for_display(&path, path_info, &config).unwrap();
 
@@ -729,6 +747,7 @@ mod tests {
                     // `truncate_to_repo = true` should attempt to display the truncated path
                     truncate_to_repo = true
                     truncation_length = 5
+                    path_separator = "/"
                 })
                 .path(dir)
                 .collect();
@@ -764,6 +783,7 @@ mod tests {
             .config(toml::toml! { // Necessary if homedir is a git repo
                 [directory]
                 truncate_to_repo = false
+                path_separator = "/"
             })
             .collect();
         let expected = Some(format!("{} ", Color::Cyan.bold().paint("~")));
@@ -779,6 +799,7 @@ mod tests {
             .config(toml::toml! {
                 [directory]
                 truncation_length = 4
+                path_separator = "/"
                 [directory.substitutions]
                 "/some/long/network/path" = "/some/net"
                 "a/b/c" = "d"
@@ -798,6 +819,8 @@ mod tests {
         let actual = ModuleRenderer::new("directory")
             .path("/path/to/sub")
             .config(toml::toml! {
+                [directory]
+                path_separator = "/"
                 [directory.substitutions]
                 "/path/to/sub" = "/correct/order"
                 "/to/sub" = "/wrong/order"
@@ -811,22 +834,22 @@ mod tests {
 
     #[test]
     fn strange_substitution() -> io::Result<()> {
-        let strange_sub = "/\\/;,!";
         let actual = ModuleRenderer::new("directory")
             .path("/foo/bar/regular/path")
             .config(toml::toml! {
                 [directory]
                 truncation_length = 0
                 fish_style_pwd_dir_length = 2 // Overridden by substitutions
+                path_separator = "/"
                 [directory.substitutions]
-                "regular" = strange_sub
+                "regular" = "*/\\/;,!" // When parsed as a path: "*/;.!"
             })
             .collect();
         let expected = Some(format!(
             "{} ",
             Color::Cyan
                 .bold()
-                .paint(format!("/foo/bar/{}/path", strange_sub))
+                .paint("/foo/bar/*/;,!/path")
         ));
 
         assert_eq!(expected, actual);
@@ -841,9 +864,9 @@ mod tests {
 
         let actual = ModuleRenderer::new("directory")
             .path(dir)
-            .config(toml::toml!{
+            .config(toml::toml! {
                 [directory]
-                path_separator = "slash"
+                path_separator = "/"
             })
             .collect();
         let expected = Some(format!(
@@ -861,7 +884,13 @@ mod tests {
         let dir = tmp_dir.path().join("engine/schematics");
         fs::create_dir_all(&dir)?;
 
-        let actual = ModuleRenderer::new("directory").path(dir).collect();
+        let actual = ModuleRenderer::new("directory")
+            .config(toml::toml! {
+                [directory]
+                path_separator = "/"
+            })
+            .path(dir)
+            .collect();
         let expected = Some(format!(
             "{} ",
             Color::Cyan
@@ -884,6 +913,7 @@ mod tests {
                 [directory]
                 truncation_length = 1
                 fish_style_pwd_dir_length = 2
+                path_separator = "/"
             })
             .path(&dir)
             .collect();
@@ -900,7 +930,13 @@ mod tests {
 
     #[test]
     fn root_directory() -> io::Result<()> {
-        let actual = ModuleRenderer::new("directory").path("/").collect();
+        let actual = ModuleRenderer::new("directory")
+            .config(toml::toml! {
+                [directory]
+                path_separator = "/"
+            })
+            .path("/")
+            .collect();
         #[cfg(not(target_os = "windows"))]
         let expected = Some(format!(
             "{}{} ",
@@ -920,7 +956,13 @@ mod tests {
         let dir = tmp_dir.path().join("thrusters/rocket");
         fs::create_dir_all(&dir)?;
 
-        let actual = ModuleRenderer::new("directory").path(dir).collect();
+        let actual = ModuleRenderer::new("directory")
+            .config(toml::toml! {
+                [directory]
+                path_separator = "/"
+            })
+            .path(dir)
+            .collect();
         let expected = Some(format!(
             "{} ",
             Color::Cyan
@@ -942,14 +984,20 @@ mod tests {
             .config(toml::toml! {
                 [directory]
                 truncation_length = 100
+                path_separator = "/"
             })
             .path(&dir)
             .collect();
+        let expected = if cfg!(windows) {
+            dir.to_string_lossy().replace(r"\", "/")
+        } else {
+            dir.to_string_lossy().to_string()
+        };
         let expected = Some(format!(
             "{} ",
             Color::Cyan
                 .bold()
-                .paint("TODO" /*truncate(dir.to_slash_lossy(), 100)*/)
+                .paint(expected)
         ));
 
         assert_eq!(expected, actual);
@@ -967,14 +1015,20 @@ mod tests {
                 [directory]
                 truncation_length = 1
                 fish_style_pwd_dir_length = 100
+                path_separator = "/"
             })
             .path(&dir)
             .collect();
+        let expected = if cfg!(windows) {
+            dir.to_string_lossy().replace(r"\", "/")
+        } else {
+            dir.to_string_lossy().to_string()
+        };
         let expected = Some(format!(
             "{} ",
             Color::Cyan
                 .bold()
-                .paint("TODO" /*to_fish_style(100, dir.to_slash_lossy(), "")*/)
+                .paint(expected)
         ));
 
         assert_eq!(expected, actual);
@@ -991,6 +1045,7 @@ mod tests {
             .config(toml::toml! {
                 [directory]
                 truncation_length = 2
+                path_separator = "/"
             })
             .path(dir)
             .collect();
@@ -1005,24 +1060,29 @@ mod tests {
 
     #[test]
     fn fish_directory_config_small() -> io::Result<()> {
-        let (tmp_dir, _) = make_known_tempdir(Path::new("/tmp"))?;
+        let (tmp_dir, name) = make_known_tempdir(Path::new("/tmp"))?;
         let dir = tmp_dir.path().join("thrusters/rocket");
         fs::create_dir_all(&dir)?;
 
         let actual = ModuleRenderer::new("directory")
             .config(toml::toml! {
                 [directory]
-                truncation_length = 2
-                fish_style_pwd_dir_length = 1
+                truncation_length = 1
+                fish_style_pwd_dir_length = 2
+                path_separator = "/"
             })
             .path(&dir)
             .collect();
+        let expected = if cfg!(windows) {
+            let path = tmp_dir.path().to_string_lossy().to_string();
+            let drive_prefix = &path[0..=1]; // E.g. "C:" in "C:\tmp"
+            format!("{}/tm/{}/th/rocket", drive_prefix, &name[0..=2])
+        } else {
+            format!("/tm/{}/th/rocket", &name[0..=2])
+        };
         let expected = Some(format!(
             "{} ",
-            Color::Cyan.bold().paint(format!(
-                "{}/thrusters/rocket",
-                "TODO" /*to_fish_style(1, dir.to_slash_lossy(), "/thrusters/rocket")*/
-            ))
+            Color::Cyan.bold().paint(expected)
         ));
 
         assert_eq!(expected, actual);
@@ -1037,7 +1097,13 @@ mod tests {
         fs::create_dir(&repo_dir)?;
         init_repo(&repo_dir).unwrap();
 
-        let actual = ModuleRenderer::new("directory").path(repo_dir).collect();
+        let actual = ModuleRenderer::new("directory")
+            .config(toml::toml! {
+                [directory]
+                path_separator = "/"
+            })
+            .path(repo_dir)
+            .collect();
         let expected = Some(format!("{} ", Color::Cyan.bold().paint("rocket-controls")));
 
         assert_eq!(expected, actual);
@@ -1448,7 +1514,8 @@ mod tests {
             .config(toml::toml! {
                 [directory]
                 truncation_length = 3
-                truncation_symbol = "…/"
+                truncation_symbol = "…"
+                path_separator = "/"
             })
             .path(Path::new("/a/four/element/path"))
             .collect();
@@ -1466,7 +1533,8 @@ mod tests {
             .config(toml::toml! {
                 [directory]
                 truncation_length = 4
-                truncation_symbol = "…/"
+                truncation_symbol = "…"
+                path_separator = "/"
             })
             .path(Path::new("/a/four/element/path"))
             .collect();
@@ -1488,7 +1556,8 @@ mod tests {
             .config(toml::toml! {
                 [directory]
                 truncation_length = 3
-                truncation_symbol = "…/"
+                truncation_symbol = "…"
+                path_separator = "/"
             })
             .path(dir)
             .collect();
@@ -1511,7 +1580,8 @@ mod tests {
                 [directory]
                 truncate_to_repo = false // Necessary if homedir is a git repo
                 truncation_length = 4
-                truncation_symbol = "…/"
+                truncation_symbol = "…"
+                path_separator = "/"
             })
             .path(dir)
             .collect();
@@ -1535,7 +1605,8 @@ mod tests {
             .config(toml::toml! {
                 [directory]
                 truncation_length = 3
-                truncation_symbol = "…/"
+                truncation_symbol = "…"
+                path_separator = "/"
             })
             .path(dir)
             .collect();
@@ -1556,8 +1627,9 @@ mod tests {
             .config(toml::toml! {
                 [directory]
                 truncation_length = 5
-                truncation_symbol = "…/"
+                truncation_symbol = "…"
                 truncate_to_repo = true
+                path_separator = "/"
             })
             .path(dir)
             .collect();
@@ -1577,7 +1649,8 @@ mod tests {
             .config(toml::toml! {
                 [directory]
                 truncation_length = 2
-                truncation_symbol = "…/"
+                truncation_symbol = "…"
+                path_separator = "/"
             })
             .path(dir)
             .collect();
@@ -1594,7 +1667,8 @@ mod tests {
             .config(toml::toml! {
                 [directory]
                 truncation_length = 1
-                truncation_symbol = "…/"
+                truncation_symbol = "…"
+                path_separator = "/"
             })
             .path(dir)
             .collect();
@@ -1611,7 +1685,8 @@ mod tests {
             .config(toml::toml! {
                 [directory]
                 truncation_length = 1
-                truncation_symbol = r"…\"
+                truncation_symbol = r"…"
+                path_separator = r"\"
             })
             .path(dir)
             .collect();
@@ -1637,6 +1712,7 @@ mod tests {
                 [directory]
                 use_logical_path = true
                 truncation_length = 3
+                path_separator = "/"
             })
             .path(path)
             .logical_path(logical_path)
@@ -1663,6 +1739,7 @@ mod tests {
                 [directory]
                 use_logical_path = false
                 truncation_length = 3
+                path_separator = "/"
             })
             .path(path)
             .logical_path(logical_path) // logical_path should be ignored
@@ -1689,7 +1766,7 @@ mod tests {
                 [directory]
                 use_logical_path = false
                 truncation_length = 0
-                path_separator = "backslash"
+                path_separator = r"\"
             })
             .path(sys32_path)
             .collect();
@@ -1714,7 +1791,7 @@ mod tests {
                 [directory]
                 use_logical_path = false
                 truncation_length = 0
-                path_separator = "backslash"
+                path_separator = r"\"
             })
             .path(unc_path)
             .collect();
